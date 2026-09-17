@@ -73,6 +73,19 @@ Reveal top Encounter card. 5 base effects (multiple copies of each in a 14-card 
 
 After resolving the effect, the card goes face-up into your collection (counts toward Chatterbox).
 
+### The New Encounters (BGA option)
+
+Promo module that adds 4 cards to the Encounter deck. Three of them cost 1 coin; a player who can't or won't pay declines and gets nothing (logged as `declines to pay for an encounter`).
+
+| Card | Cost | Effect |
+|------|------|--------|
+| Itamae (cook) | 1 coin | Draw a Meal card. If you don't already own that meal, add it to your collection and score its 6 VP; otherwise nothing. |
+| Kitoushi | 1 coin | Choose a panorama you haven't completed, take its next card and score it (like Annaibito, but paid). |
+| Saru (monkey) | — | Draw a Hot Spring card and score it (2 or 3 VP). |
+| Takuhatsuso (mendicant monk) | 1 coin | Score 4 VP. |
+
+A meal gained from Itamae counts as a meal (collection, Gourmet) even though it wasn't eaten at an Inn.
+
 ## Inns
 
 All 4 Inns are mandatory. On arrival, the **first Traveler to reach this Inn** draws (player_count + 1) Meal cards in secret (the `Gastronomy` variation reduces this to player_count, making meal availability tighter). They optionally buy one for its printed cost (1/2/3 coins) — Meals are always worth **6 VP** regardless of price. Subsequent arrivals buy from the remaining cards.
@@ -85,6 +98,21 @@ Constraints:
 After all Travelers have arrived, unbought meals go to the bottom of the deck and the journey resumes (the player still last on the road moves first).
 
 Meal name → cost in `tokaido_constants.MEAL_COST`.
+
+## Game options (BGA modules)
+
+Table-level options in `table_ids.json` (`tables[].options`). Share of the 296K indexed tables with each on:
+
+| Option | On | Effect |
+|--------|--:|--------|
+| Crossroads | 26% | Expansion — see [crossroads.md](crossroads.md). |
+| Gastronomy | 37% | First arrival at an Inn draws `player_count` Meal cards instead of `player_count + 1`. |
+| Preparations | 19% | Redistributes starting coins by seat. Observed in 4p games (the only player count in the corpus with it on): `starting_position` 1 → +2, 2 → +1, 3 → +0, 4 → −1. |
+| The New Encounters | 18% | 4 extra Encounter cards — see Encounters above. |
+| Return trip | 2% | Board is traveled in reverse (right to left). |
+| Initiation | 1% | Simplified intro: no traveler selection, everyone starts with 7 coins. |
+
+Rule text for these comes from BGA's Tokaido game help page; the Preparations coin table and the encounter behaviour were checked against replay logs.
 
 ## End of game
 
@@ -133,4 +161,4 @@ Adds a Neutral Traveler. Whoever is *ahead* on the road moves the Neutral Travel
 
 ## VP Reconciliation Note
 
-Sum of `vp_*` columns equals `final_score` exactly. Modern BGA replays emit per-traveler-ability log lines (e.g. `Hirotada: ${player} earns ${points}`, `Umegae: ...`, `Mitsukuni: ...`) as their own log entries — the parser captures these as `TravelerAbility` rows rather than inlining the bonus on the parent action, otherwise it would double-count.
+Sum of `vp_*` columns equals `final_score` for all but a handful of rows (see the reconciliation section in [bga_replay_format.md](bga_replay_format.md)). Modern BGA replays emit per-traveler-ability log lines (e.g. `Hirotada: ${player} earns ${points}`, `Umegae: ...`, `Mitsukuni: ...`) as their own log entries — the parser captures these as `TravelerAbility` rows rather than inlining the bonus on the parent action, otherwise it would double-count.

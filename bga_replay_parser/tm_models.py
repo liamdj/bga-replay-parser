@@ -190,11 +190,14 @@ class TMPlayerResult:
 
 @dataclass
 class TMAuctionBid:
-    """One player's bid on one faction in a fast-auction setup.
+    """One player's bid on one faction in an auction setup (fast or slow).
 
-    In the fast auction every player submits, for every faction, the starting
-    VP they'd accept to play it (lower = more willing). `is_winning_bid` marks
-    the (player, faction) pair that the auction actually assigned.
+    `bid_starting_vp` is the starting VP the player offered to accept for that
+    faction (lower = bid harder). Fast auction: every player bids once on every
+    faction. Slow (standard) auction: players rebid as they are outbid, so this
+    is the player's LAST bid on the faction, and only factions they bid on
+    appear. `is_winning_bid` marks the (player, faction) pair the auction
+    assigned.
     """
     player_id: str = ""
     player_name: str = ""

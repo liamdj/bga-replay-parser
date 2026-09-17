@@ -34,7 +34,17 @@ The parser dispatches on **`event.log`** (the template string), not `event.type`
 `TokaidoParser.should_skip(packets)` returns a reason string for:
 
 - **Fewer than 3 players** — 2p Tokaido has different rules; the parser was written for 3p+. Detected by counting `travelerChosen` events.
-- **Preparations expansion** — detected via any event whose log contains both `"Preparation"` and `"${player_name}"`. Seasons 22-23 use it; not handled.
+- **Sentinel `score_aux` in the final result block** (normal games have `score_aux` ≥ 0, the achievement count):
+  - `-4245` — abandoned game. Remaining players get `score: 1`, the leaver `0`. `concede` and `zombie` are both 0, and tableinfos still reports `endgame_reason: normal_end`.
+  - `-4242` — the game finished normally (tableinfos has real scores), but the archived result block is zeroed: every player `score: 0`, `rank: 1`, `tie: true`. Seen on 6 games from 2018. Skipped because the replay has no usable final score or rank.
+- **No result block** at all — `parse_packets` returns None.
+
+Preparations games are **parsed**, not skipped. The module only redistributes starting coins, and `travelerChosen`'s `player_coins` counter already reflects the adjusted purse, so `starting_coins` is correct. `game.preparations` is set when any log contains both `"Preparation"` and `"${player_name}"`:
+
+```
+log:  "Preparations: ${player_name} starts with ${bonus_coins} coin(s)"
+args: { player_id, bonus_coins: "+2"|"+1"|"+0"|-1 }     # string with sign, or int for negatives
+```
 
 Crossroads is detected per-game by the presence of any `CherryTree`/`BathHouse`/`Calligraphy`/`CalligraphyScored`/`LegendaryObject`/`Amulet`/`AmuletUsed` move row, and sets `game.has_crossroads`. The batch parser writes Crossroads games to a separate CSV from base games.
 
@@ -160,6 +170,21 @@ log:  "${player_name} gives 1 coin (from the bank) to the Temple and earns 1 poi
 log:  "${player_name} gets a panorama card and scores ${points} points (Annaibito)"   # picks panorama color
 log:  "${player_name} gets a souvenir card and earns ${points} points (Shokunin)"     # picks souvenir
 ```
+
+The New Encounters module (table option `"The New Encounters": "On"`) adds four more:
+
+```
+# Paid encounters log the payment alone; the payoff is the NEXT event
+log:  "${player_name} pays 1 coin for an encounter (${encounter_name})"     # encounter_name: Itamae | Kitoushi
+#   Itamae   -> "${player_name} eats a meal on the road (${name}) and scores ${points} points"   args: { name, points, cards }
+#               "${player_name} eats a meal on the road (${name}) but can`t add it to his collection as he ate that meal already"   # 0 VP
+#   Kitoushi -> "${player_name} gets a free panorama of his choice"   then the normal "scores ${points} points (Panorama)" event
+log:  "${player_name} pays 1 coin for an encounter (Takuhatsuso) and earns 4 points"          args: { coins: 1, points: 4 }
+log:  "${player_name} gets a hot spring card and scores ${points} points (Saru)"              args: { points, coins: 0, cards }
+log:  "${player_name} declines to pay for an encounter (${name})"                              # no effect
+```
+
+Parser mapping: paid Itamae/Kitoushi → `Encounter` row with `coins_spent=1`; Takuhatsuso → `Encounter`, `coins_spent=1`, VP to `vp_encounter`; Saru → `Encounter`, VP to `vp_hot_spring` (it hands over a hot spring card, same pattern as Annaibito → panorama); Itamae's meal → `RoadMeal` row, VP to `vp_inn` and `num_meals += 1`. The "can't add it" and "declines" lines are ignored (no VP, no coins). Before these handlers existed, affected players were under-counted by typically 2–10 VP (up to ~23).
 
 **Important quirk**: Miko is a *bank-funded* temple donation. The coin comes from the bank, not the player's purse. The parser sets `coins_gained=1, coins_donated=1` so the player-purse model `gained − spent − donated` nets to 0 (no actual purse change), but `num_donations` still increments for temple-rank purposes.
 
@@ -304,7 +329,12 @@ Card-bearing events (Calligraphy/Amulet/LegendaryObject purchases, souvenir buys
 
 ## VP reconciliation
 
-After parsing, `sum(vp_*) == final_score` exactly for every player in every game (33,708 games × 4 players, 0 discrepancies after the coin-balance and donation-routing fixes documented in [`tokaido_models.py`](../../bga_replay_parser/tokaido_models.py)).
+`sum(vp_*) == final_score` for all but ~9 of ~270K player rows (full corpus, after the New Encounters handlers and sentinel-result skip were added). History of the gaps:
+
+- **Sentinel-result games** (15 abandoned with `score_aux -4245`, 6 zeroed with `-4242`; ~84 rows) are now skipped by `should_skip` — see *Replays to skip*.
+- **9 rows in 8 games** with a small positive gap (2–8 VP) and no unmatched scoring log — unexplained.
+
+Earlier "exactly, 0 discrepancies" claims predate the corpus growing to include The New Encounters games.
 
 ## Storage layout
 
@@ -312,7 +342,7 @@ After parsing, `sum(vp_*) == final_score` exactly for every player in every game
 data/batch/tokaido/raw/<table_id>.json     # raw gamelogs (no replay HTML)
 data/batch/tokaido/parsed/                 # batch parser output
   player_results_base.csv                   # one row per player per base game
-  player_results_xroads.csv                 # one row per player per Crossroads game (+10 cols)
+  player_results_xroads.csv                 # one row per player per Crossroads game (+19 cols: 61 vs 42)
   moves_base.csv                            # one row per action in a base game
   moves_xroads.csv                          # one row per action in a Crossroads game
 ```

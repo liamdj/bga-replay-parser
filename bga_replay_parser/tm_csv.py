@@ -206,8 +206,12 @@ def _worker_parse(path):
             html, game_metadata=meta, table_id=table_id)
     except Exception as e:
         return {"status": "error", "fname": fname, "err": f"{type(e).__name__}: {e}"}
-    if game.num_players == 0:
-        return {"status": "empty"}
+    # No game content: the saved file isn't a replay (a live table page or a
+    # generic BGA shell with an empty/missing g_gamelogs). Players can still be
+    # filled from metadata, so check rounds too, or the game lands in
+    # setup/player_results with no factions and 0 VP.
+    if game.num_players == 0 or game.total_rounds == 0:
+        return {"status": "skipped"}
 
     return {
         "status": "parsed",

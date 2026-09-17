@@ -130,6 +130,21 @@ class TokaidoParser:
                     travelers += 1
         if travelers and travelers < 3:
             return "fewer than 3 players"
+        # BGA writes a sentinel score_aux into the replay's result block
+        # (normal games have score_aux >= 0 = achievement count):
+        #   -4245  abandoned — remaining players scored 1, the leaver 0.
+        #   -4242  finished game whose archived result is zeroed (all 0, all
+        #          rank 1); BGA's tableinfos still has the real scores, but
+        #          the replay doesn't, so final_score/rank are unusable.
+        for r in self._extract_final_result(packets):
+            try:
+                aux = int(r.get("score_aux", 0))
+            except (TypeError, ValueError):
+                continue
+            if aux == -4245:
+                return "abandoned game (score_aux -4245)"
+            if aux < 0:
+                return f"zeroed result block (score_aux {aux})"
         # Preparations expansion is supported: it only redistributes starting
         # coins by position; player_coins on travelerChosen already reflects
         # the post-allocation value, so `starting_coins` captures it.
@@ -341,6 +356,34 @@ class TokaidoParser:
             row.subtype = "Shokunin"
             row.points_gained = points
             self._add_souvenirs(row, args)
+            return True
+        # Paid encounters (extra encounter deck). Itamae and Kitoushi log the
+        # 1-coin payment on its own; the payoff follows as a separate event
+        # (a road meal for Itamae, a normal Panorama scoring event for Kitoushi).
+        if log == "${player_name} pays 1 coin for an encounter (${encounter_name})":
+            row.type = "Encounter"
+            row.subtype = args.get("encounter_name", "") or ""
+            row.coins_spent = 1
+            return True
+        if log == "${player_name} pays 1 coin for an encounter (Takuhatsuso) and earns 4 points":
+            row.type = "Encounter"
+            row.subtype = "Takuhatsuso"
+            row.coins_spent = 1
+            row.points_gained = points or 4
+            return True
+        if log == "${player_name} gets a hot spring card and scores ${points} points (Saru)":
+            row.type = "Encounter"
+            row.subtype = "Saru"
+            row.points_gained = points
+            return True
+        # Itamae payoff: a meal eaten away from an Inn. It joins the player's
+        # meal collection, so it's routed like an Inn meal (vp_inn, num_meals)
+        # but kept as its own move type. The "but can't add it" variant (meal
+        # already owned) scores nothing and is ignored.
+        if log == "${player_name} eats a meal on the road (${name}) and scores ${points} points":
+            row.type = "RoadMeal"
+            row.subtype = args.get("name", "") or ""
+            row.points_gained = points
             return True
 
         # Inn
@@ -598,6 +641,9 @@ class TokaidoParser:
             if sub == "miko":
                 pr.vp_temple += pts
                 pr.num_donations += 1
+            elif sub == "saru":
+                # Saru hands over a hot spring card and scores it inline.
+                pr.vp_hot_spring += pts
             elif sub.startswith("annaibito"):
                 # Annaibito places a panorama card in the player's collection
                 # and scores it inline — no follow-up Panorama event fires.
@@ -621,6 +667,9 @@ class TokaidoParser:
             pr.vp_inn += pts
             if sub != "skipped":
                 pr.num_meals += 1
+        elif t == "RoadMeal":
+            pr.vp_inn += pts
+            pr.num_meals += 1
         elif t == "Village":
             pr.vp_village += pts
             if sub != "skipped":

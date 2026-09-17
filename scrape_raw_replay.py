@@ -121,7 +121,14 @@ def filter_tables(tables, table_ids, args):
         if not t:
             continue
 
-        if t.get("normalend") is False:
+        # Unfinished games. `normalend`/`concede` come from tableinfos, but BGA
+        # reports most abandoned games as endgame_reason "normal_end"; their
+        # reliable signature is every player scoring 0 or 1 (remaining players
+        # get 1, the leaver 0). No finished TM or Tokaido game scores that low.
+        if t.get("normalend") is False or t.get("concede"):
+            continue
+        scores = [p.get("score") for p in t.get("players", [])]
+        if scores and all(sc is not None and sc <= 1 for sc in scores):
             continue
 
         if args.players is not None and t.get("num_players") != args.players:
@@ -213,6 +220,13 @@ def _is_browser_dead(scraper):
         return True
 
 
+def _has_gamelog_packets(html):
+    """True if the page's g_gamelogs holds at least one packet."""
+    from bga_replay_parser.tm_parser import TerraMysticaParser  # generic BGA extraction helpers
+    p = TerraMysticaParser()
+    return bool(p._get_packets(p._extract_g_gamelogs(html)))
+
+
 def scrape_one_table(scraper, table_id, player_id, out_dir, raw_format="html"):
     """Scrape one table's replay in the chosen raw format.
 
@@ -262,6 +276,11 @@ def scrape_one_table(scraper, table_id, player_id, out_dir, raw_format="html"):
     replay_html = result.get("html_content", "")
     if not replay_html:
         return {"success": False, "error": "empty_content", "limit_reached": False, "deleted": False}
+    # The scraper's load checks can pass on a page that isn't a replay (e.g. the
+    # live table page, or a BGA shell without g_gamelogs). Only save pages with
+    # a populated game log.
+    if not _has_gamelog_packets(replay_html):
+        return {"success": False, "error": "no_gamelogs", "limit_reached": False, "deleted": False}
 
     with open(os.path.join(out_dir, f"replay_{table_id}.html"), "w", encoding="utf-8") as f:
         f.write(replay_html)
