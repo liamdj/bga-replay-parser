@@ -1,0 +1,866 @@
+"""
+BGA Session Management
+Combines session-based authentication with Selenium browser automation
+Eliminates the need for manual login by transferring authenticated session cookies
+"""
+
+import requests
+from bs4 import BeautifulSoup
+import re
+import logging
+import time
+import os
+from urllib.parse import urlparse
+from typing import Optional, Dict, Any
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+logger = logging.getLogger(__name__)
+
+
+class BGASession:
+    """
+    BGA session manager that combines requests.Session authentication
+    with Selenium WebDriver automation, eliminating manual login requirements
+    """
+    
+    BASE_URL = 'https://en.boardgamearena.com'
+    LOGIN_URL = '/account'
+    
+    def __init__(self, email: str, password: str, chromedriver_path: str, chrome_path: str=None, headless: bool = False):
+        """
+        Initialize session manager
+        
+        Args:
+            email: BGA account email
+            password: BGA account password
+            chromedriver_path: Path to ChromeDriver executable
+            headless: Whether to run Chrome in headless mode
+        """
+        self.email = email
+        self.password = password
+        self.chromedriver_path = chromedriver_path
+        self.chrome_path = chrome_path
+        self.headless = headless
+        self.effective_base_origin = self.BASE_URL
+        
+        # Session-based components
+        self.session = requests.Session()
+        self.request_token: Optional[str] = None
+        self.is_session_logged_in = False
+        
+        # Browser-based components
+        self.driver: Optional[webdriver.Chrome] = None
+        self.is_browser_logged_in = False
+        
+        # Combined status
+        self.is_fully_authenticated = False
+    
+    def login(self) -> bool:
+        """
+        Perform complete authentication using browser automation
+        
+        Returns:
+            bool: True if browser authentication successful
+        """
+        logger.info("Starting authentication process...")
+        
+        # Step 1: Start browser if not already started
+        if not self.driver:
+            if not self._start_browser():
+                logger.error("Failed to start browser")
+                return False
+        
+        # Step 2: Authenticate using browser automation
+        if not self._login_session():
+            logger.error("Browser-based login failed")
+            return False
+        
+        # Authentication is complete - browser is now logged in
+        self.is_fully_authenticated = True
+        logger.info("✅ Authentication completed successfully!")
+        return True
+    
+    def _login_session(self, max_retries: int = 3, retry_delay: int = 2) -> bool:
+        """
+        Perform browser-based login using Selenium interactions
+        Now handles BGA's two-step authentication process using browser automation
+        
+        Args:
+            max_retries: Maximum number of retries for login
+            retry_delay: Delay between retries in seconds
+            
+        Returns:
+            bool: True if browser login successful
+        """
+        if not self.driver:
+            logger.error("Browser not started - cannot perform login")
+            return False
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Performing browser-based login (attempt {attempt + 1}/{max_retries})...")
+                
+                # Navigate to login page
+                login_url = f'{self.BASE_URL}{self.LOGIN_URL}'
+                logger.info(f"Navigating to login page: {login_url}")
+                self.driver.get(login_url)
+                time.sleep(2)  # Wait for page to load
+                
+                # Update effective base origin after navigation
+                try:
+                    current_url = self.driver.current_url
+                    from urllib.parse import urlparse
+                    parsed = urlparse(current_url)
+                    if parsed.scheme and parsed.hostname:
+                        self.effective_base_origin = f"{parsed.scheme}://{parsed.hostname}"
+                        logger.debug(f"Effective base origin set to: {self.effective_base_origin}")
+                except Exception as e:
+                    logger.debug(f"Could not update effective base origin: {e}")
+                
+                # Dismiss browser warning banner if present (it blocks clicks)
+                try:
+                    ignore_button = WebDriverWait(self.driver, 2).until(
+                        EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Ignore')]"))
+                    )
+                    ignore_button.click()
+                    time.sleep(0.5)
+                    logger.info("Dismissed browser warning banner")
+                except:
+                    # Banner not present or already dismissed
+                    logger.debug("No browser warning banner to dismiss")
+                
+                # STEP 1: Enter email and click Next
+                logger.info("Step 1: Entering email/username...")
+                
+                try:
+                    # Find email input field - use highly specific selectors to avoid search bar
+                    email_input = None
+                    email_selectors = [
+                        # Combine multiple attributes to uniquely identify login field
+                        (By.CSS_SELECTOR, "input[name='email'][placeholder='Email or username']"),
+                        (By.CSS_SELECTOR, "input[name='email'][autocomplete='email']"),
+                        (By.XPATH, "//input[@name='email' and @placeholder='Email or username']"),
+                        (By.XPATH, "//input[@name='email' and @autocomplete='email']"),
+                        (By.XPATH, "//input[@autocomplete='email' and contains(@placeholder, 'mail')]"),
+                        # Less specific fallbacks
+                        (By.CSS_SELECTOR, "input[placeholder='Email or username']"),
+                        (By.CSS_SELECTOR, "input[autocomplete='email']"),
+                        (By.NAME, "email")
+                    ]
+                    
+                    for by, selector in email_selectors:
+                        try:
+                            # Wait for element to be clickable (not just present)
+                            email_input = WebDriverWait(self.driver, 5).until(
+                                EC.element_to_be_clickable((by, selector))
+                            )
+                            # Double-check it's not readonly
+                            if not email_input.get_attribute('readonly'):
+                                logger.debug(f"Found editable email input with selector: {by}={selector}")
+                                break
+                            else:
+                                email_input = None
+                        except:
+                            continue
+                    
+                    if not email_input:
+                        raise Exception("Could not find editable email input field")
+                    
+                    # Scroll element into view
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", email_input)
+                    time.sleep(0.3)
+                    
+                    # Click to focus the field
+                    try:
+                        email_input.click()
+                    except Exception as e:
+                        # If click fails, try JavaScript click
+                        logger.debug(f"Regular click failed, trying JavaScript click: {e}")
+                        self.driver.execute_script("arguments[0].click();", email_input)
+                    
+                    time.sleep(0.3)
+                    
+                    # Clear and type the email
+                    email_input.clear()
+                    email_input.send_keys(self.email)
+                    logger.info(f"Entered email: {self.email}")
+                    
+                    # Small delay to let the value register
+                    time.sleep(0.5)
+                    
+                    # Verify the value was entered
+                    entered_value = email_input.get_attribute('value')
+                    if not entered_value or len(entered_value) < 3:
+                        raise Exception(f"Email field value not set correctly. Got: '{entered_value}'")
+                    logger.debug(f"Verified email field contains: {entered_value}")
+                    
+                    # Find and click Next button (BGA uses <a> tags styled as buttons)
+                    next_button = None
+                    next_button_selectors = [
+                        (By.LINK_TEXT, "Next"),
+                        (By.XPATH, "//a[contains(text(), 'Next')]"),
+                        (By.CSS_SELECTOR, "a.bga-button"),
+                        (By.XPATH, "//button[contains(text(), 'Next')]"),
+                        (By.CSS_SELECTOR, "button[type='submit']"),
+                        (By.ID, "submit_button"),
+                        (By.XPATH, "//button[contains(@class, 'submit')]"),
+                        (By.XPATH, "//input[@type='submit']")
+                    ]
+                    
+                    for by, selector in next_button_selectors:
+                        try:
+                            next_button = self.driver.find_element(by, selector)
+                            logger.debug(f"Found next button with selector: {by}={selector}")
+                            break
+                        except:
+                            continue
+                    
+                    if not next_button:
+                        raise Exception("Could not find Next button")
+                    
+                    # Click Next button (with JavaScript fallback if blocked by overlay)
+                    try:
+                        next_button.click()
+                        logger.info("Clicked Next button")
+                    except Exception as e:
+                        # If click fails due to overlay, try JavaScript click
+                        logger.debug(f"Regular click on Next button failed, trying JavaScript: {e}")
+                        self.driver.execute_script("arguments[0].click();", next_button)
+                        logger.info("Clicked Next button (JavaScript)")
+                    
+                    time.sleep(2)  # Wait for password field to appear
+                    
+                except Exception as e:
+                    logger.error(f"Error in Step 1 (email entry): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        return False
+                
+                # STEP 2: Enter password and click Login
+                logger.info("Step 2: Entering password...")
+                
+                try:
+                    # Find password input field - excluding readonly elements
+                    password_input = None
+                    password_selectors = [
+                        (By.ID, "password_input"),
+                        (By.NAME, "password"),
+                        (By.CSS_SELECTOR, "input[type='password']:not([readonly])"),
+                        (By.XPATH, "//input[@type='password' and not(@readonly)]"),
+                        (By.XPATH, "//input[@tabindex='0' and @type='password']")
+                    ]
+                    
+                    for by, selector in password_selectors:
+                        try:
+                            # Wait for element to be clickable (not just present)
+                            password_input = WebDriverWait(self.driver, 5).until(
+                                EC.element_to_be_clickable((by, selector))
+                            )
+                            # Double-check it's not readonly
+                            if not password_input.get_attribute('readonly'):
+                                logger.debug(f"Found editable password input with selector: {by}={selector}")
+                                break
+                            else:
+                                password_input = None
+                        except:
+                            continue
+                    
+                    if not password_input:
+                        raise Exception("Could not find editable password input field")
+                    
+                    # Scroll element into view
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", password_input)
+                    time.sleep(0.3)
+                    
+                    # Click to focus the field
+                    try:
+                        password_input.click()
+                    except Exception as e:
+                        # If click fails, try JavaScript click
+                        logger.debug(f"Regular click failed, trying JavaScript click: {e}")
+                        self.driver.execute_script("arguments[0].click();", password_input)
+                    
+                    time.sleep(0.3)
+                    
+                    # Clear and type the password
+                    password_input.clear()
+                    password_input.send_keys(self.password)
+                    logger.info("Entered password")
+                    
+                    # Small delay to let the value register
+                    time.sleep(0.5)
+                    
+                    # Verify the value was entered
+                    entered_value = password_input.get_attribute('value')
+                    if not entered_value or len(entered_value) < 3:
+                        raise Exception(f"Password field value not set correctly. Got length: {len(entered_value) if entered_value else 0}")
+                    logger.debug("Verified password field contains value")
+                    
+                    # Find and click Login button (BGA uses <a> tags styled as buttons)
+                    login_button = None
+                    login_button_selectors = [
+                        (By.LINK_TEXT, "Login"),
+                        (By.XPATH, "//a[contains(text(), 'Login')]"),
+                        (By.CSS_SELECTOR, "a.bga-button"),
+                        (By.XPATH, "//button[contains(text(), 'Login')]"),
+                        (By.CSS_SELECTOR, "button[type='submit']"),
+                        (By.ID, "login_button"),
+                        (By.XPATH, "//button[contains(@class, 'submit')]"),
+                        (By.XPATH, "//input[@type='submit']")
+                    ]
+                    
+                    for by, selector in login_button_selectors:
+                        try:
+                            login_button = self.driver.find_element(by, selector)
+                            logger.debug(f"Found login button with selector: {by}={selector}")
+                            break
+                        except:
+                            continue
+                    
+                    if not login_button:
+                        raise Exception("Could not find Login button")
+                    
+                    # Click Login button (with JavaScript fallback if blocked by overlay)
+                    try:
+                        login_button.click()
+                        logger.info("Clicked Login button")
+                    except Exception as e:
+                        # If click fails due to overlay, try JavaScript click
+                        logger.debug(f"Regular click on Login button failed, trying JavaScript: {e}")
+                        self.driver.execute_script("arguments[0].click();", login_button)
+                        logger.info("Clicked Login button (JavaScript)")
+                    
+                    time.sleep(3)  # Wait for login to complete
+                    
+                except Exception as e:
+                    logger.error(f"Error in Step 2 (password entry): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        return False
+                
+                # Verify login by checking for authentication indicators
+                if self._verify_browser_authentication():
+                    self.is_session_logged_in = True
+                    self.is_browser_logged_in = True
+                    logger.info("✅ Browser-based login successful")
+                    
+                    # Also copy cookies to requests session for API calls
+                    try:
+                        self.session = requests.Session()
+                        cookies = self.driver.get_cookies()
+                        for cookie in cookies:
+                            self.session.cookies.set(
+                                cookie['name'],
+                                cookie['value'],
+                                domain=cookie.get('domain', '.boardgamearena.com'),
+                                path=cookie.get('path', '/')
+                            )
+                        logger.debug(f"Copied {len(cookies)} cookies to requests session")
+                    except Exception as e:
+                        logger.warning(f"Could not copy cookies to requests session: {e}")
+                    
+                    return True
+                else:
+                    logger.warning(f"Browser login verification failed on attempt {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                
+            except Exception as e:
+                logger.error(f"Browser login failed on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.error("Max retries reached for browser login")
+                    return False
+        
+        logger.error("Browser login failed after all retries")
+        return False
+    
+    def _extract_request_token_with_retry(self, max_retries: int = 3, retry_delay: int = 2) -> Optional[str]:
+        """
+        Extract request token from a BGA page with retry logic
+        
+        Args:
+            max_retries: Maximum number of retries
+            retry_delay: Delay between retries in seconds
+            
+        Returns:
+            str: Request token, or None if failed
+        """
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"Fetching initial page to extract request token (attempt {attempt + 1}/{max_retries})...")
+                
+                # Use a page that is less likely to be rate-limited
+                resp = self.session.get(f'{self.BASE_URL}/welcome', timeout=5)
+                resp.raise_for_status()
+
+                # Determine effective origin (handles locale subdomains like en.boardgamearena.com)
+                try:
+                    parsed = urlparse(resp.url)
+                    if parsed.scheme and parsed.hostname:
+                        self.effective_base_origin = f"{parsed.scheme}://{parsed.hostname}"
+                        logger.debug(f"Effective base origin set to: {self.effective_base_origin}")
+                except Exception as e:
+                    logger.debug(f"Could not determine effective base origin from {resp.url}: {e}")
+                
+                # Extract request token from JavaScript
+                token = self._extract_request_token(resp.content)
+                if token:
+                    return token
+                
+                logger.warning(f"Failed to extract request token on attempt {attempt + 1}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error fetching page for token extraction on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+        
+        return None
+
+    def _extract_request_token(self, html_content: bytes) -> Optional[str]:
+        """Extract request token from HTML content"""
+        try:
+            # Use regex for faster extraction without full parsing
+            # Pattern looks for: requestToken: '...' or "..."
+            token_pattern = re.compile(rb"requestToken:\s*['\"]([^'\"]+)['\"]")
+            match = token_pattern.search(html_content)
+            
+            if match:
+                token = match.group(1).decode('utf-8')
+                logger.debug(f"Extracted token with regex: {token[:10]}...")
+                return token
+            
+            # Fallback to BeautifulSoup if regex fails
+            logger.debug("Regex for token failed, falling back to BeautifulSoup")
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            for script_tag in soup.find_all('script'):
+                if script_tag.string:
+                    script_content = script_tag.string
+                    if 'requestToken: ' in script_content:
+                        # More robust extraction from script content
+                        token_match = re.search(r"requestToken:\s*['\"]([^'\"]+)['\"]", script_content)
+                        if token_match:
+                            token = token_match.group(1)
+                            logger.debug(f"Extracted token with BeautifulSoup: {token[:10]}...")
+                            return token
+            
+            logger.warning("Request token not found in HTML content")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting request token: {e}")
+            return None
+    
+    def _verify_session_authentication(self) -> bool:
+        """Verify that session-based authentication was successful"""
+        try:
+            # Access a protected page and inspect final URL/content
+            test_resp = self.session.get(f'{self.effective_base_origin}/account', allow_redirects=True, timeout=15)
+            test_resp.raise_for_status()
+            final_url = test_resp.url
+            page_content = test_resp.text
+            lower = page_content.lower()
+
+            # Redirected to login page indicates unauthenticated
+            if final_url.endswith('/account/account/login.html'):
+                return False
+
+            # Presence of login form or action to login page indicates unauthenticated
+            if ('form_id="loginform"' in lower) or ('/account/account/login.html' in lower and '<form' in lower):
+                return False
+
+            # Logout link path strongly indicates authenticated
+            if '/account/account/logout.html' in lower:
+                return True
+
+            # Additional check: try to access player stats without being redirected to login
+            stats_resp = self.session.get(
+                f'{self.effective_base_origin}/gamestats',
+                params={'player': "689196352"},
+                allow_redirects=True,
+                timeout=5
+            )
+            stats_url = stats_resp.url.lower()
+            stats_page = stats_resp.text.lower()
+            if (
+                stats_resp.status_code == 200
+                and not stats_url.endswith('/account/account/login.html')
+                and 'form_id="loginform"' not in stats_page
+                and '/account/account/login.html' not in stats_page
+            ):
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error verifying session authentication: {e}")
+            return False
+    
+    def _setup_chromedriver_service(self) -> Service:
+        """
+        Setup ChromeDriver service with smart detection
+        
+        Returns:
+            Service: Configured ChromeDriver service
+        """
+        # Priority order:
+        # 1. Manual path (if configured and exists)
+        # 2. webdriver-manager (with built-in caching)
+        
+        if (self.chromedriver_path and 
+            self.chromedriver_path != "None" and 
+            os.path.exists(self.chromedriver_path)):
+            
+            logger.info(f"Using manual ChromeDriver path: {self.chromedriver_path}")
+            return Service(self.chromedriver_path, log_output=os.devnull)
+        
+        else:
+            logger.info("Using webdriver-manager for ChromeDriver")
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager
+                
+                # This call is fast if driver is cached, only downloads if needed
+                driver_path = ChromeDriverManager().install()
+                logger.info(f"ChromeDriver ready at: {driver_path}")
+                return Service(driver_path, log_output=os.devnull)
+                
+            except ImportError:
+                logger.error("webdriver-manager not installed. Please install it with: pip install webdriver-manager")
+                raise RuntimeError("webdriver-manager not available and no manual ChromeDriver path provided")
+            except Exception as e:
+                logger.error(f"webdriver-manager failed: {e}")
+                raise RuntimeError(f"ChromeDriver setup failed: {e}")
+
+    def _start_browser(self) -> bool:
+        """Start Chrome browser with appropriate options"""
+        try:
+            logger.info("Starting Chrome browser...")
+            
+            chrome_options = Options()
+            
+            if self.headless:
+                chrome_options.add_argument('--headless')
+            
+            # Add useful Chrome options
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            chrome_options.add_argument('--log-level=3')
+            
+            # Set user agent to match session requests
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+            if self.chrome_path:
+                # If a custom Chrome path is provided, set it
+                chrome_options.binary_location = self.chrome_path
+            
+            # Setup ChromeDriver service with smart detection
+            service = self._setup_chromedriver_service()
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+            # Execute script to hide automation indicators
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            logger.info("✅ Chrome browser started successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start browser: {e}")
+            return False
+    
+    def _transfer_cookies_to_browser(self) -> bool:
+        """Transfer authenticated session cookies to Selenium browser with correct domains/attributes"""
+        try:
+            logger.info("Transferring session cookies to browser (domain-aware)...")
+
+            if not self.driver:
+                logger.warning("WebDriver is not initialized")
+                return False
+
+            # Determine scheme/host from effective base origin
+            try:
+                parsed_origin = urlparse(self.effective_base_origin)
+                origin_scheme = parsed_origin.scheme or "https"
+                origin_host = parsed_origin.hostname or "boardgamearena.com"
+            except Exception:
+                origin_scheme = "https"
+                origin_host = "boardgamearena.com"
+
+            # Get cookies from requests session
+            session_cookies = list(self.session.cookies) if self.session and self.session.cookies else []
+            if not session_cookies:
+                logger.warning("No cookies found in session")
+                return False
+
+            # Group cookies by domain (normalize leading dot)
+            cookies_by_domain = {}
+            for c in session_cookies:
+                domain = (c.domain or origin_host).lstrip(".")
+                cookies_by_domain.setdefault(domain, []).append(c)
+
+            cookies_transferred = 0
+
+            # Visit each domain host before adding its cookies (required by Selenium/Chrome)
+            for domain_host, cookies in cookies_by_domain.items():
+                try:
+                    target_url = f"{origin_scheme}://{domain_host}"
+                    logger.debug(f"Preparing to set cookies for host: {domain_host}")
+                    self.driver.get(target_url)
+                    time.sleep(1)
+                except Exception as e:
+                    logger.debug(f"Failed to navigate to {domain_host} for cookie injection: {e}")
+                    continue
+
+                for cookie in cookies:
+                    try:
+                        # Build Selenium cookie dict safely
+                        is_host_cookie = cookie.name.startswith("__Host-") or not cookie.domain
+                        cookie_dict = {
+                            "name": cookie.name,
+                            "value": cookie.value,
+                            "path": cookie.path if cookie.path else "/",
+                        }
+
+                        # __Host- cookies MUST NOT set domain, MUST be Secure, path="/"
+                        if is_host_cookie:
+                            cookie_dict["path"] = "/"
+                            cookie_dict["secure"] = True
+                        else:
+                            # Provide a proper host (without leading dot)
+                            cookie_dict["domain"] = (cookie.domain or domain_host).lstrip(".")
+                            if cookie.secure:
+                                cookie_dict["secure"] = True
+
+                        # Expiry if available (requests stores as int epoch or None)
+                        if getattr(cookie, "expires", None):
+                            try:
+                                cookie_dict["expiry"] = int(cookie.expires)
+                            except Exception:
+                                pass
+
+                        # Note: Some browsers ignore httpOnly/sameSite when injecting via DevTools; ignore if unsupported
+                        self.driver.add_cookie(cookie_dict)
+                        cookies_transferred += 1
+                        logger.debug(f"Transferred cookie: {cookie.name} for domain {cookie_dict.get('domain', domain_host)}")
+                    except Exception as e:
+                        logger.debug(f"Failed to transfer cookie {cookie.name} for {domain_host}: {e}")
+                        continue
+
+                # Refresh to apply this domain's cookies
+                try:
+                    self.driver.refresh()
+                    time.sleep(1)
+                except Exception:
+                    pass
+
+            # Navigate back to effective base origin
+            try:
+                self.driver.get(self.effective_base_origin)
+                time.sleep(1)
+            except Exception:
+                pass
+
+            logger.info(f"✅ Transferred {cookies_transferred} cookies to browser across {len(cookies_by_domain)} domain(s)")
+            return cookies_transferred > 0
+
+        except Exception as e:
+            logger.error(f"Error transferring cookies to browser: {e}")
+            return False
+    
+    def _verify_browser_authentication(self) -> bool:
+        """Verify that browser has been successfully authenticated"""
+        try:
+            logger.info("Verifying browser authentication...")
+            
+            # Navigate to a page that requires authentication (use effective origin)
+            self.driver.get(f'{self.effective_base_origin}/account')
+            time.sleep(3)
+
+            current_url = self.driver.current_url
+            page_source = self.driver.page_source
+            lower = page_source.lower()
+            
+            # Redirected to login page indicates unauthenticated
+            if current_url.endswith('/account/account/login.html'):
+                logger.warning("Browser shows login page - authentication failed")
+                return False
+
+            # Presence of login form or action to login page indicates unauthenticated
+            if ('form_id="loginform"' in lower) or ('/account/account/login.html' in lower and '<form' in lower):
+                logger.warning("Browser shows login form - authentication failed")
+                return False
+            
+            # Logout link path or player_name presence indicates authenticated
+            if '/account/account/logout.html' in lower or 'player_name' in lower:
+                logger.info("✅ Browser authentication verified")
+                self.is_browser_logged_in = True
+                return True
+            
+            # Additional test: try to access game stats
+            self.driver.get(f'{self.effective_base_origin}/gamestats?player=689196352')
+            time.sleep(2)
+            
+            current_url = self.driver.current_url
+            page_source = self.driver.page_source.lower()
+            if (not current_url.endswith('/account/account/login.html')
+                and 'form_id="loginform"' not in page_source
+                and '/account/account/login.html' not in page_source
+                and 'fatal error' not in page_source):
+                logger.info("✅ Browser authentication verified via game stats")
+                self.is_browser_logged_in = True
+                return True
+            
+            logger.warning("Browser authentication verification failed")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error verifying browser authentication: {e}")
+            return False
+    
+    def refresh_authentication(self) -> bool:
+        """
+        Refresh authentication if session expires
+        
+        Returns:
+            bool: True if refresh successful
+        """
+        logger.info("Refreshing authentication...")
+        
+        # Reset authentication status
+        self.is_session_logged_in = False
+        self.is_browser_logged_in = False
+        self.is_fully_authenticated = False
+        
+        # Perform fresh login
+        return self.login()
+    
+    def check_authentication_status(self) -> Dict[str, bool]:
+        """
+        Check current authentication status
+        
+        Returns:
+            dict: Status of session, browser, and overall authentication
+        """
+        status = {
+            'session_authenticated': self.is_session_logged_in,
+            'browser_authenticated': self.is_browser_logged_in,
+            'fully_authenticated': self.is_fully_authenticated
+        }
+        
+        # Quick verification if needed
+        if self.is_fully_authenticated:
+            try:
+                # Quick check of browser status
+                if self.driver:
+                    current_url = self.driver.current_url
+                    if 'boardgamearena.com' in current_url:
+                        page_source = self.driver.page_source.lower()
+                        if 'must be logged' in page_source:
+                            status['browser_authenticated'] = False
+                            status['fully_authenticated'] = False
+                            self.is_browser_logged_in = False
+                            self.is_fully_authenticated = False
+            except:
+                pass
+        
+        return status
+    
+    def get_session(self) -> requests.Session:
+        """
+        Get the authenticated requests session
+        
+        Returns:
+            requests.Session: Authenticated session for API calls
+        """
+        if not self.is_session_logged_in:
+            raise RuntimeError("Session not authenticated. Call login() first.")
+        return self.session
+    
+    def get_driver(self) -> webdriver.Chrome:
+        """
+        Get the authenticated Selenium WebDriver
+        
+        Returns:
+            webdriver.Chrome: Authenticated browser driver
+        """
+        if not self.is_browser_logged_in:
+            raise RuntimeError("Browser not authenticated. Call login() first.")
+        return self.driver
+    
+    def get(self, url: str, **kwargs) -> requests.Response:
+        """
+        Make authenticated GET request (compatibility method for LeaderboardScraper)
+        
+        Args:
+            url: URL to request
+            **kwargs: Additional arguments for requests
+            
+        Returns:
+            requests.Response: Response object
+        """
+        if not self.is_session_logged_in:
+            raise RuntimeError("Session not authenticated. Call login() first.")
+        return self.session.get(url, **kwargs)
+    
+    def post(self, url: str, **kwargs) -> requests.Response:
+        """
+        Make authenticated POST request (compatibility method for LeaderboardScraper)
+        
+        Args:
+            url: URL to request
+            **kwargs: Additional arguments for requests
+            
+        Returns:
+            requests.Response: Response object
+        """
+        if not self.is_session_logged_in:
+            raise RuntimeError("Session not authenticated. Call login() first.")
+        return self.session.post(url, **kwargs)
+    
+    @property
+    def is_logged_in(self) -> bool:
+        """
+        Check if session is logged in (compatibility property for LeaderboardScraper)
+        
+        Returns:
+            bool: True if session is authenticated
+        """
+        return self.is_session_logged_in
+    
+    def close_browser(self):
+        """Close the browser if it's open"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                logger.info("Browser closed")
+            except:
+                pass
+            finally:
+                self.driver = None
+                self.is_browser_logged_in = False
+                self.is_fully_authenticated = False
+    
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - cleanup resources"""
+        self.close_browser()

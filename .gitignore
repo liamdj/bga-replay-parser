@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# IDE / tooling
+.vscode
+.idea
+.claude
+*.swp
+
+# OS
+.DS_Store
+
+# Selenium
+chrome-debug-profile/
+
+# Secrets
+config.py
+accounts*.py
+!accounts.example.py
+
+# Game data (raw + parsed; large, published separately)
+data/
+
+# User analysis (game-specific, published separately)
+analysis/
+
+# Personal automation (production scraping loop + watchdog + runbook)
+automation/
