@@ -26,8 +26,5 @@ accounts*.py
 # Game data (raw + parsed; large, published separately)
 data/
 
-# User analysis (game-specific, published separately)
-analysis/
-
 # Personal automation (production scraping loop + watchdog + runbook)
 automation/

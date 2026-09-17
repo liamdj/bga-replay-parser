@@ -7,7 +7,7 @@ Tools for scraping and parsing BoardGameArena replays into pandas-ready CSVs. Cu
 | Terra Mystica | HTML | [`bga_replay_parser/tm_parser.py`](bga_replay_parser/tm_parser.py) | [`parse_terra_mystica.py`](parse_terra_mystica.py) |
 | Tokaido | JSON | [`bga_replay_parser/tokaido_parser.py`](bga_replay_parser/tokaido_parser.py) | [`parse_tokaido.py`](parse_tokaido.py) |
 
-The BGA login and replay-scraping layer (`bga_session.py`, `scraper.py`, `leaderboard_scraper.py`) is adapted from [HStrand/bga-tm-scraper](https://github.com/HStrand/bga-tm-scraper), a Terraforming Mars scraper — thanks to Håkon Hapnes Strand and contributors. Here it is generalized across games; the Terra Mystica and Tokaido parsers, indexing script, and docs are new. For Terraforming Mars parsing, use the upstream repo.
+The BGA login and replay-scraping layer (`bga_session.py`, `scraper.py`, `leaderboard_scraper.py`) is adapted from [HStrand/bga-tm-scraper](https://github.com/HStrand/bga-tm-scraper), a Terraforming Mars scraper. Here it is generalized across games; the Terra Mystica and Tokaido parsers, indexing script, and docs are new. For Terraforming Mars parsing, use the upstream repo.
 
 ## Quick start
 
