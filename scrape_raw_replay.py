@@ -3,7 +3,7 @@
 Scrape raw replay data from BGA (game-agnostic). Two raw-format modes:
 
   --raw-format html (default)
-      Selenium-loads the full replay page and saves replay_<table>.html.
+      Selenium-loads the full replay page and saves replay_<table>.html.zst.
       Required for games whose parser uses `gameui.completesetup` gamedatas
       (Terra Mystica).
 
@@ -31,6 +31,7 @@ from datetime import datetime
 
 import config
 from bga_replay_parser import constants
+from bga_replay_parser.replay_io import find_replay, write_replay_html
 from bga_replay_parser.scraper import BGAScraper
 
 logging.basicConfig(
@@ -231,7 +232,7 @@ def scrape_one_table(scraper, table_id, player_id, out_dir, raw_format="html"):
     """Scrape one table's replay in the chosen raw format.
 
     raw_format == "html": navigates /gamereview + the replay page, saves
-        replay_<table_id>.html.
+        replay_<table_id>.html.zst (zstd-compressed).
     raw_format == "json": hits the BGA archive API directly, saves
         <table_id>.json (a flat list of gamelogs packets).
     """
@@ -282,8 +283,7 @@ def scrape_one_table(scraper, table_id, player_id, out_dir, raw_format="html"):
     if not _has_gamelog_packets(replay_html):
         return {"success": False, "error": "no_gamelogs", "limit_reached": False, "deleted": False}
 
-    with open(os.path.join(out_dir, f"replay_{table_id}.html"), "w", encoding="utf-8") as f:
-        f.write(replay_html)
+    write_replay_html(out_dir, table_id, replay_html)
 
     return {"success": True, "error": None, "limit_reached": False, "deleted": False}
 
@@ -413,7 +413,7 @@ def main():
                            if os.path.exists(os.path.join(out_dir, f"{tid}.json"))}
     else:
         already_on_disk = {tid for tid in table_ids
-                           if os.path.exists(os.path.join(out_dir, f"replay_{tid}.html"))}
+                           if find_replay(out_dir, tid)}
     remaining = [tid for tid in table_ids if tid not in scraped_set and tid not in failed_set and tid not in already_on_disk]
 
     # Print summary
@@ -597,7 +597,8 @@ def main():
             if config.REQUEST_DELAY > 0:
                 time.sleep(config.REQUEST_DELAY)
     finally:
-        scraper.close_browser()
+        if scraper:
+            scraper.close_browser()
 
     total_remaining = len(remaining) - scraped_this_run - len(failed_set.intersection(remaining))
     print(f"\nSummary:")
