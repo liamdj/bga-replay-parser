@@ -68,7 +68,7 @@ Dwarves and Fakirs cannot advance Shipping (they use Tunneling/Carpet Flight ins
 Plains → Swamp → Lakes → Forest → Mountains → Wasteland → Desert → Plains
 ```
 
-Each step costs 1 Spade. Transforming goes either direction around the cycle; the shorter path is used.
+Each step costs 1 Spade. Transforming goes either direction around the cycle.
 
 Steps between terrains:
 | From\To    | Plains | Swamp | Lakes | Forest | Mountains | Wasteland | Desert |

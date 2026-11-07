@@ -29,7 +29,7 @@ Standard reference values: starting power 5/7, starting resources 3w+15c, standa
   - **16 Power**: +20 VP
 
 ### Chash Dallah (Forest) — BGA: "chashdallah"
-- **Starting ability**: No Exchange track. Has an **Income track** instead. As an action, advance Income track 1 space for 2w+2c, gaining the depicted VP (2/2/3/4 VP for levels 1-4). In Phase I, gain cumulative Coins and Workers from current level and all below.
+- **Starting ability**: No Exchange track. Has an **Income track** instead. As an action, advance Income track 1 space for 2w+2c, gaining the depicted VP (1/2/3/4 VP for levels 1-4). In Phase I, gain cumulative Coins and Workers from current level and all below.
 - **Income track level 0**: 2c basic income (no advance needed)
 - **No Spade exchange** — cannot lower Workers-per-Spade cost
 
@@ -59,18 +59,19 @@ Standard reference values: starting power 5/7, starting resources 3w+15c, standa
 - **Starting ability**: Converting a Priest yields 2w+2c (instead of 1w). **All structures have Power value 2** (Dwellings=2, TH=2, TE=2, SH=2, SA=2).
 - **Dwelling cost**: 2w+2c
 - **Temple income**: p, 5pw, p
-- **Base income**: 2w (instead of standard 0w basic income)
+- **Base income**: 2w (instead of standard 1w basic income)
 - **Stronghold**:
   - On build: gain 2 Priests immediately
-  - Ability: Towns including your SH require only **3 structures** (instead of 4)
+  - Ability: Towns including your SH require only **3 structures** (instead of 4, like the SA)
 
 ### The Enlightened (Forest) — BGA: "theenlightened"
 - **Starting ability**: Use **Power instead of Workers** to transform terrain (Exchange track shows Power-per-Spade). Anytime during your turn, spend 1 Coin to gain 1 Power token in Bowl I.
-- **Dwelling income**: 2pw per slot (instead of 1w)
+- **Base income**: 3pw
+- **Dwelling income**: 2pw, 3pw alternating (instead of 1w)
 - **Temple cost**: 1p+5c
 - **Sanctuary cost**: 2p+6c
 - **Trading House income**: 2c+1pw, 2c+1pw, 3c+1pw, 4c+1pw
-- **Stronghold cost**: 2p 4c
+- **Stronghold cost**: 1p 4c
 - **Stronghold**:
   - Ability: Conversions (Power → Priest/Worker/Coin) yield **2 instead of 1**. Special action: gain 4 Power.
 
@@ -85,11 +86,16 @@ Standard reference values: starting power 5/7, starting resources 3w+15c, standa
 - **Starting resources**: 2w, 15c
 - **Starting ability**: Must use **Golden Spades** to transform terrain. Cannot use regular Spades — instead gain 1 Priest per regular Spade received. When taking Transform and Build, buy Golden Spades at 4 Coins each. Each Golden Spade also grants +1 VP and +1 Power.
 - **Stronghold**:
-  - Ability: Golden Spades now cost **3 Coins** (instead of 4). Special action: take 1 Coin per opponent Trading Post on the board.
+  - Ability: Golden Spades now cost **3 Coins** (instead of 4). 
+  - Special action: take 1 Coin per opponent Trading Post on the board.
+  - Income: 3pw
 
 ### Time Travelers (Plains) — BGA: "timetravellers"
 - **Starting ability**: Do **not** score VP from the current round's Scoring tile. Instead score VP from **both** the previous round's and next round's Scoring tiles. Round 1 uses round 6 as "previous"; round 6 uses round 1 as "next". If both tiles reward the same action, gain both. Cult bonuses still come from the current round's tile. Scoring tiles are not flipped face-down.
-- **Temple cost**: 4w+8c (non-standard)
+- **Stronghold**:
+  - Cost: 4w+8c
+  - Special action: move 4 Power tokens directly from Bowl 1 to Bowl 3
+  - Income: 2pw
 - **Sanctuary cost**: 4w+8c
 
 ### Treasurers (Wasteland) — BGA: "treasurers"
@@ -104,4 +110,5 @@ Standard reference values: starting power 5/7, starting resources 3w+15c, standa
 - **Starting ability**: Whenever you build a Trading Post, may immediately transform 1 directly adjacent terrain with exactly 1 free Spade (no buying additional Spades, no building on that space).
 - **Stronghold**:
   - On build: gain 7 VP and place 1 free Dwelling on any unoccupied Lakes space (no cost, ignore adjacency, must have been Lakes at start of this action)
+  - Income: 3pw
 

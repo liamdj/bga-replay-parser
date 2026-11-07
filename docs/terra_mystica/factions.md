@@ -14,7 +14,7 @@ Starting power is 12 tokens across Bowl I/II (Bowl III starts empty). Standard: 
   - Ability: 3 Spades to apply immediately (once)
 
 ## Cultists (Plains)
-- **Starting ability**: Advance 1 cult when opponent takes Power from your building
+- **Starting ability**: Advance 1 cult when opponent takes Power from your building. When opponents could have taken Power but all decline, instead gain 1 Power.
 - **Stronghold**:
   - Income: 4pw
   - Ability: +7 VP (once)

@@ -27,7 +27,7 @@ Each faction is bound to one terrain type (its "Home terrain") and color.
 | Variable   | varies | Shapeshifters             | Choose a Home terrain at faction selection |
 | Variable   | varies | Riverwalkers              | Choose a Starting terrain; unlock terrains via Priests |
 
-### Fan Factions (BGA implementation)
+### Fan Factions
 
 | Terrain    | Color  | Factions                  |
 |------------|--------|---------------------------|
@@ -51,7 +51,7 @@ Each faction has a starting ability, a stronghold ability, unique starting resou
 
 ### Base Game Terrains (7)
 
-Plains, Swamp, Lakes, Forest, Mountains, Wasteland, Desert. Arranged in a circular Transformation cycle. Each step costs 1 Spade; shorter direction around the cycle is used.
+Plains, Swamp, Lakes, Forest, Mountains, Wasteland, Desert. Arranged in a circular Transformation cycle. Each step costs 1 Spade.
 
 ### Fire & Ice Terrains (2)
 
