@@ -1,13 +1,14 @@
 # BGA Replay Parser
 
-Tools for scraping and parsing BoardGameArena replays into pandas-ready CSVs. Currently supports two games:
+Tools for scraping and parsing BoardGameArena replays into pandas-ready CSVs. Currently supports three games:
 
 | Game | Raw format | Parser | Batch script |
 |---|---|---|---|
 | Terra Mystica | HTML | [`bga_replay_parser/tm_parser.py`](bga_replay_parser/tm_parser.py) | [`parse_terra_mystica.py`](parse_terra_mystica.py) |
 | Tokaido | JSON | [`bga_replay_parser/tokaido_parser.py`](bga_replay_parser/tokaido_parser.py) | [`parse_tokaido.py`](parse_tokaido.py) |
+| Wingspan | JSON | [`bga_replay_parser/wingspan_parser.py`](bga_replay_parser/wingspan_parser.py) | [`parse_wingspan.py`](parse_wingspan.py) |
 
-The BGA login and replay-scraping layer (`bga_session.py`, `scraper.py`, `leaderboard_scraper.py`) is adapted from [HStrand/bga-tm-scraper](https://github.com/HStrand/bga-tm-scraper), a Terraforming Mars scraper. Here it is generalized across games; the Terra Mystica and Tokaido parsers, indexing script, and docs are new. For Terraforming Mars parsing, use the upstream repo.
+The BGA login and replay-scraping layer (`bga_session.py`, `scraper.py`, `leaderboard_scraper.py`) is adapted from [HStrand/bga-tm-scraper](https://github.com/HStrand/bga-tm-scraper), a Terraforming Mars scraper. Here it is generalized across games; the Terra Mystica, Tokaido and Wingspan parsers, indexing script, and docs are new. For Terraforming Mars parsing, use the upstream repo.
 
 ## Quick start
 
@@ -24,6 +25,7 @@ python scrape_raw_replay.py --file data/batch/tokaido/table_ids.json
 
 # Batch-parse raw replays into CSVs
 python parse_tokaido.py        data/batch/tokaido/raw/
+python parse_wingspan.py       data/batch/wingspan/raw/
 python parse_terra_mystica.py  data/batch/terra_mystica/replays/
 ```
 
@@ -32,7 +34,8 @@ Parsed datasets are published at [huggingface.co/datasets/liamdj/bga-replays](ht
 ## More
 
 - [`docs/`](docs/) — game reference docs (rules, factions, BGA replay format) — [`docs/README.md`](docs/README.md) is the index.
-- [`CLAUDE.md`](CLAUDE.md) — the main architecture doc: scraping flow, parser internals and output columns, VP reconciliation quirks, repo layout.
+- [`AGENTS.md`](AGENTS.md) — the main architecture doc and guide for coding agents: scraping flow, common commands, repo layout. (`CLAUDE.md` just imports it.)
+- `docs/<game>/parser.md` — per-game parser internals: output columns, BGA event quirks, reconciliation checks.
 
 ## License
 
