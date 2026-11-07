@@ -6,6 +6,8 @@ from the tableinfos API.
 
 Usage:
     python index_top_players.py <game_id-or-name> [-n 100] [--since 2025-01-01] [--until 2025-12-31]
+    python index_top_players.py wingspan --players 2 3
+    python index_top_players.py wingspan --players 2 3 --tables-from data/batch/wingspan/raw
 
 Game can be a numeric BGA game ID (e.g. 1003) or a short name from
 constants.GAME_IDS (e.g. tokaido, terra_mystica).
@@ -268,6 +270,17 @@ def main():
         help="Only include games on or before this date (YYYY-MM-DD)",
     )
     parser.add_argument(
+        "--players", type=int, nargs="+", default=[4], metavar="N",
+        help="Player counts to enrich with tableinfos (default: 4). Tables with "
+             "other player counts are kept unenriched. E.g. --players 2 3",
+    )
+    parser.add_argument(
+        "--tables-from", type=str, default=None, metavar="REPLAY_DIR",
+        help="Enrich-only mode: take table IDs from the raw replay filenames in "
+             "this directory (<table_id>.json / replay_<table_id>.html[.zst]) instead of "
+             "walking the leaderboard players' game histories.",
+    )
+    parser.add_argument(
         "--supplementary-elo-threshold", type=int, default=None,
         help="After enrichment, also collect games for non-leaderboard players whose "
              "elo_before in any enriched game exceeded this threshold. "
@@ -317,6 +330,25 @@ def main():
     supplementary_set = set(progress["supplementary_players"])
     tables_dict = progress["tables"]
     enriched_set = set(progress.get("enriched_tables", []))
+
+    enrich_counts = set(args.players)
+    counts_label = "/".join(str(n) for n in sorted(enrich_counts)) + "-player"
+
+    def wants_enrichment(tid):
+        """Unenriched, and of a wanted player count (unknown counts are wanted)."""
+        if tid in enriched_set:
+            return False
+        num_players = tables_dict[tid].get("num_players")
+        return num_players is None or num_players in enrich_counts
+
+    if args.tables_from:
+        seeded = 0
+        for fname in os.listdir(args.tables_from):
+            tid = fname.split(".")[0].replace("replay_", "")
+            if tid.isdigit() and tid not in tables_dict:
+                tables_dict[tid] = {}
+                seeded += 1
+        print(f"Seeded {seeded} table IDs from {args.tables_from} ({len(tables_dict)} total)")
 
     if processed_set:
         print(f"Resuming: {len(processed_set)} players processed, {len(supplementary_set)} supplementary, {len(tables_dict)} tables, {len(enriched_set)} enriched")
@@ -454,17 +486,14 @@ def main():
                 since_recycle += 1
             return new_tables_total
 
-        def enrich_4p_tables(pass_name):
-            """Enrich all unenriched 4-player tables via tableinfos API."""
-            unenriched = [tid for tid in tables_dict
-                          if tid not in enriched_set
-                          and tables_dict[tid].get("num_players", 4) == 4]
+        def enrich_tables(pass_name):
+            """Enrich all unenriched tables of a wanted player count via tableinfos API."""
+            unenriched = [tid for tid in tables_dict if wants_enrichment(tid)]
             skipped = sum(1 for tid in tables_dict
-                          if tid not in enriched_set
-                          and tables_dict[tid].get("num_players", 4) != 4)
+                          if tid not in enriched_set and not wants_enrichment(tid))
             if not unenriched:
                 return 0
-            print(f"\n{pass_name} Enriching {len(unenriched)} 4-player tables with tableinfos API (skipping {skipped} non-4p)...")
+            print(f"\n{pass_name} Enriching {len(unenriched)} {counts_label} tables with tableinfos API (skipping {skipped} with other player counts)...")
             i = 0
             crash_retry = 0
             xhr_failures_in_a_row = 0
@@ -565,19 +594,21 @@ def main():
         leaderboard_ids = {p["player_id"] for p in players}
         leaderboard_list = [(p["player_id"], p["name"]) for p in players]
         to_do = [p for p in leaderboard_list if p[0] not in processed_set]
-        if to_do:
+        if args.tables_from:
+            print(f"\n[2] --tables-from given: skipping leaderboard game histories.")
+        elif to_do:
             print(f"\n[2] Collecting table IDs from {len(to_do)} leaderboard players...")
             process_players(leaderboard_list, "leaderboard", processed_set, "processed_players")
         else:
             print(f"\n[2] All {len(players)} leaderboard players already processed.")
 
-        # Step 3: Enrich 4-player tables
-        enriched_count = enrich_4p_tables("[3]")
+        # Step 3: Enrich tables of the wanted player counts
+        enriched_count = enrich_tables("[3]")
         if enriched_count == 0:
-            print(f"\n[3] All 4-player tables already enriched.")
+            print(f"\n[3] All {counts_label} tables already enriched.")
 
         # Step 4: Second pass — find supplementary high-ELO players not on the leaderboard
-        if args.supplementary_elo_threshold is not None:
+        if args.supplementary_elo_threshold is not None and not args.tables_from:
             # Exclude both leaderboard and already-processed players (arena-leaderboard
             # carryover, etc.) so we don't redundantly re-collect their games.
             already_done = leaderboard_ids | processed_set | supplementary_set
@@ -588,8 +619,8 @@ def main():
                 print(f"\n[4] Found {len(supplementary)} non-leaderboard players with ELO > {args.supplementary_elo_threshold} in enriched games. Collecting their games...")
                 process_players(supplementary, "supplementary", supplementary_set, "supplementary_players")
 
-                # Step 5: Enrich any newly-added 4p tables
-                enriched_count_2 = enrich_4p_tables("[5]")
+                # Step 5: Enrich any newly-added tables
+                enriched_count_2 = enrich_tables("[5]")
                 if enriched_count_2 == 0:
                     print(f"\n[5] No new tables from supplementary pass to enrich.")
             else:
@@ -613,16 +644,12 @@ def main():
     with open(output_path, "w") as f:
         json.dump(output, f, indent=2)
 
-    # Compute remaining unenriched 4p tables to report honest status
-    enriched_set_now = set(progress.get("enriched_tables", []))
-    remaining_4p = sum(
-        1 for tid, t in tables_dict.items()
-        if tid not in enriched_set_now and t.get("num_players", 4) == 4
-    )
-    if remaining_4p == 0:
+    # Compute remaining unenriched tables to report honest status
+    remaining = sum(1 for tid in tables_dict if wants_enrichment(tid))
+    if remaining == 0:
         print(f"\nDone! {len(sorted_tables)} tables saved to {output_path}")
     else:
-        print(f"\nStopped early: {remaining_4p} 4p tables still unenriched.")
+        print(f"\nStopped early: {remaining} {counts_label} tables still unenriched.")
         print(f"   {len(sorted_tables)} tables saved to {output_path}")
         sys.exit(2)
 

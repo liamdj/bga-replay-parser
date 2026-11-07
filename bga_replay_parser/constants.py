@@ -19,6 +19,7 @@ REPLAY_URL_TEMPLATE = (
 GAME_IDS = {
     "terra_mystica": 1118,
     "tokaido":       1003,
+    "wingspan":      1635,
 }
 
 # Default raw-replay format per game.
@@ -26,11 +27,12 @@ GAME_IDS = {
 #            `gameui.completesetup` gamedatas (Terra Mystica).
 #   "json" — gamelogs only via the BGA archive API. Cheaper, no Selenium
 #            replay page load. Suitable when the parser doesn't need
-#            completesetup (Tokaido).
+#            completesetup (Tokaido, Wingspan).
 # Override per-run with `scrape_raw_replay.py --raw-format`.
 RAW_FORMAT_BY_GAME = {
     "terra_mystica": "html",
     "tokaido":       "json",
+    "wingspan":      "json",
 }
 
 # --- Speed profiles for BGAScraper ---
