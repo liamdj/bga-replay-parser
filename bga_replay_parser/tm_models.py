@@ -37,6 +37,10 @@ class TMPlayerState:
 class TMMove:
     move_number: int = 0
     round_number: int = 0
+    # Turn within the round (1-based, counted across all players; resets each
+    # round). Every row produced during a turn shares it, including other
+    # players' leech rows. None outside the action phase.
+    turn_number: Optional[int] = None
     phase: str = "setup"
     player_id: str = ""
     player_name: str = ""
@@ -109,6 +113,11 @@ class TMRoundSummary:
     spades_generated: int = 0
     power_generated: int = 0
     power_spent: int = 0
+    # Net conversions this round (positive = gained, negative = given up)
+    coins_converted: int = 0
+    workers_converted: int = 0
+    priests_converted: int = 0
+    power_converted: int = 0
     vp_generated: int = 0
     vp_leach_cost: int = 0
     vp_faction_spent: int = 0
@@ -189,6 +198,31 @@ class TMPlayerResult:
 
 
 @dataclass
+class TMLeechOffer:
+    """One player's side of one "power via structures" (leech) offer.
+
+    A leech phase follows a build/upgrade by `builder_id`. `offered` is the
+    power the target could take; `cap` is how much more adjacency would have
+    given had their bowls not been too full. `response` is accept / decline /
+    none. `auto` marks a free 1-power leech BGA took without asking (it is
+    never listed as an offer). `n_offered` = targets in this phase with
+    offered > 0. (`round_number`, `turn_number`) is the builder's turn.
+    """
+    offer_id: int = 0           # running number of the leech phase in the game
+    round_number: int = 0
+    turn_number: Optional[int] = None
+    builder_id: str = ""
+    target_id: str = ""
+    n_offered: int = 0
+    offered: int = 0
+    cap: int = 0
+    auto: int = 0
+    response: str = "none"
+    gained: int = 0
+    vp_cost: int = 0
+
+
+@dataclass
 class TMAuctionBid:
     """One player's bid on one faction in an auction setup (fast or slow).
 
@@ -238,6 +272,7 @@ class TMGameData:
     moves: List[TMMove] = field(default_factory=list)
     round_summaries: List[TMRoundSummary] = field(default_factory=list)
     auction_bids: List["TMAuctionBid"] = field(default_factory=list)
+    leech_offers: List["TMLeechOffer"] = field(default_factory=list)
     scoring_tiles: List[str] = field(default_factory=list)
     bonus_cards: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -272,8 +307,13 @@ class ParseContext:
     player_bonus_card: Dict[str, str] = field(default_factory=dict)
     bonus_card_by_round: Dict[int, Dict[str, str]] = field(default_factory=dict)
     last_town_id: str = ""
-    hex_map: Dict[str, str] = field(default_factory=dict)  # bts_id -> standard label
-    bbs_map: Dict[str, tuple] = field(default_factory=dict)  # bbs_id -> (sequential_a, sequential_b)
+    last_town_move: Optional["TMMove"] = None   # found_town row awaiting its townBonus
+    # Per-game faction specs from gamedatas (factions + alternate_factions)
+    faction_specs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    bbs_map: Dict[str, tuple] = field(default_factory=dict)  # bbs_id -> (bts_id, bts_id)
+    # BGA's log text prints bridge endpoints as "[D6-E9]" with rivers skipped;
+    # this decodes those labels back to bts_id (land cells only).
+    log_label_to_bts: Dict[str, str] = field(default_factory=dict)
 
     vp_sources: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
@@ -303,6 +343,22 @@ class ParseContext:
     round_cult_bonus: Dict[str, Dict[str, int]] = field(default_factory=dict)
     round_vp_leach: Dict[str, int] = field(default_factory=dict)
     round_vp_faction: Dict[str, int] = field(default_factory=dict)
+    # Leech offers: finished rows, the open leech phase, phase counter
+    leech_offers: List["TMLeechOffer"] = field(default_factory=list)
+    leech_phase: Optional[Dict[str, Any]] = None
+    leech_counter: int = 0
+    worker_tokens: Dict[str, Optional[str]] = field(default_factory=dict)  # token id -> owner
+    # Stronghold-action row of the current turn: (player_id, TMMove), or None
+    turn_sh_marker: Optional[tuple] = None
+    last_cult_source: Dict[str, str] = field(default_factory=dict)  # pid -> addendum of last cult step
+    turn_number: int = 0          # current turn within the round (0 = none yet)
+    turn_player: str = ""
+    turn_has_rows: bool = False
+    # Alchemists coins→VP announced by justAMessage, awaiting the newScore
+    alch_vp_pending: Dict[str, int] = field(default_factory=dict)
+    # Alchemists coins→VP so far: pid -> [coins, vp]. Treated as end-game
+    # resource scoring, so round-end snapshots show the state before it.
+    alch_cashout: Dict[str, List[int]] = field(default_factory=dict)
 
     round_end_states: Dict[int, Dict[str, TMPlayerState]] = field(default_factory=dict)
 

@@ -9,19 +9,20 @@ Outputs (in `output_dir`):
     player_results.csv  — one row per player per game
     moves.csv           — one row per action
     round_summaries.csv — one row per player per round
+    leech_offers.csv    — one row per leech offer per offered player (incl. declines)
     auction_bids.csv    — one row per player per faction bid (auction games; a player's
                           last bid on each faction)
     setup.csv           — one row per game
 """
 
 import csv
-import glob
 import json
 import logging
 import multiprocessing as mp
 import os
 from dataclasses import fields
 
+from .replay_io import list_replays, read_replay_html, table_id_from_path
 from .tm_parser import TerraMysticaParser
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,7 @@ def _worker_init(metadata, exclude_modes):
 def _worker_parse(path):
     """Parse one replay in a worker. Returns a status dict of flattened rows."""
     fname = os.path.basename(path)
-    table_id = fname.replace("replay_", "").replace(".html", "")
+    table_id = table_id_from_path(path)
     meta = _WORKER_METADATA.get(table_id)
 
     # Game-mode filter (metadata-based) — skip before reading the HTML.
@@ -193,9 +194,8 @@ def _worker_parse(path):
         return {"status": "skipped"}
 
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            html = f.read()
-    except OSError as e:
+        html = read_replay_html(path)
+    except Exception as e:
         return {"status": "error", "fname": fname, "err": f"read: {e}"}
 
     if _WORKER_PARSER.should_skip_replay(html):
@@ -219,13 +219,14 @@ def _worker_parse(path):
         "move":   [flatten_move(game.table_id, mv) for mv in game.moves],
         "round":  [flatten_round(game.table_id, rs) for rs in game.round_summaries],
         "bid":    [flatten_bid(game.table_id, b) for b in game.auction_bids],
+        "leech":  [flatten_bid(game.table_id, o) for o in game.leech_offers],
         "setup":  flatten_setup(game),
     }
 
 
 def batch_parse(replay_dir, output_dir, metadata_path=None, workers=None,
                 exclude_modes=None):
-    """Parse every `replay_*.html` in `replay_dir` and stream rows to CSVs in `output_dir`.
+    """Parse every `replay_*.html[.zst]` in `replay_dir` and stream rows to CSVs in `output_dir`.
 
     If `metadata_path` is None, looks for progress_collect.json / table_ids.json
     in the parent of `replay_dir`. Skipped replays (excluded factions, landscapes)
@@ -245,13 +246,10 @@ def batch_parse(replay_dir, output_dir, metadata_path=None, workers=None,
         workers = max(1, (os.cpu_count() or 2))
     exclude_modes = frozenset(exclude_modes or ())
 
-    paths = sorted(glob.glob(os.path.join(replay_dir, "*.html")))
+    paths = list_replays(replay_dir)
     logger.info(f"Found {len(paths)} replay files in {replay_dir}")
 
-    replay_table_ids = {
-        os.path.basename(p).replace("replay_", "").replace(".html", "")
-        for p in paths
-    }
+    replay_table_ids = {table_id_from_path(p) for p in paths}
     table_metadata = load_table_metadata(metadata_path, table_ids=replay_table_ids)
     if table_metadata:
         logger.info(f"Loaded metadata for {len(table_metadata)} tables from {metadata_path}")
@@ -265,9 +263,12 @@ def batch_parse(replay_dir, output_dir, metadata_path=None, workers=None,
         "move":   os.path.join(output_dir, "moves.csv"),
         "round":  os.path.join(output_dir, "round_summaries.csv"),
         "bid":    os.path.join(output_dir, "auction_bids.csv"),
+        "leech":  os.path.join(output_dir, "leech_offers.csv"),
         "setup":  os.path.join(output_dir, "setup.csv"),
     }
-    tmp_paths = {k: p + ".tmp" for k, p in final_paths.items()}
+    # Per-process temp names: two parses into the same directory must not
+    # write (or swap in) each other's half-written files.
+    tmp_paths = {k: f"{p}.{os.getpid()}.tmp" for k, p in final_paths.items()}
     files = {k: open(tmp_paths[k], "w", newline="", encoding="utf-8") for k in final_paths}
 
     writers = {k: None for k in final_paths}
@@ -300,6 +301,8 @@ def batch_parse(replay_dir, output_dir, metadata_path=None, workers=None,
             _write("round", row)
         for row in res["bid"]:
             _write("bid", row)
+        for row in res["leech"]:
+            _write("leech", row)
         _write("setup", res["setup"])
         parsed += 1
 
@@ -337,4 +340,5 @@ def batch_parse(replay_dir, output_dir, metadata_path=None, workers=None,
     logger.info(f"Parsed: {parsed}, Skipped: {skipped}, Errors: {errors}")
     logger.info(f"Wrote {counts['setup']} setup rows, {counts['player']} player rows, "
                 f"{counts['move']} move rows, {counts['round']} round rows, "
-                f"{counts['bid']} auction-bid rows to {output_dir}")
+                f"{counts['bid']} auction-bid rows, {counts['leech']} leech-offer rows "
+                f"to {output_dir}")

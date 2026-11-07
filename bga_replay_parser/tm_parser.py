@@ -20,7 +20,11 @@ from .tm_constants import (
     SCORING_TYPE_NAMES,
 )
 from .tm_handlers import (
-    EVENT_HANDLERS, _ZERO_RES, _gen, parse_resource_html, update_counters,
+    EVENT_HANDLERS, _ZERO_RES, _gen, add_cult_bonus_spades, apply_alch_cashout,
+    handle_alchemists_conversion, leech_close, leech_response,
+    leech_state_change, parse_resource_html, sync_priests,
+    sync_workers,
+    update_counters,
 )
 from .tm_models import (
     EloData, ParseContext, TMAuctionBid, TMGameData, TMMove, TMPlayerResult,
@@ -78,6 +82,10 @@ class TerraMysticaParser:
         excluded = played & EXCLUDED_FACTIONS
         if excluded:
             return f"excluded faction: {sorted(excluded)[0]}"
+
+        if ('"landscape_active":true' in replay_html
+                or '"type":"landscapePlaced"' in replay_html):
+            return "landscapes expansion"
 
         # Conceded / abandoned games (none exist in the current corpus — BGA
         # doesn't surface them in player game histories — but guard future
@@ -145,6 +153,12 @@ class TerraMysticaParser:
     # -------------------------------------------------------------------
 
     def _build_lookups(self, gamedatas: Dict, ctx: ParseContext):
+        for key in ("alternate_factions", "factions"):
+            specs = gamedatas.get(key)
+            if isinstance(specs, dict):
+                for fname, spec in specs.items():
+                    if isinstance(spec, dict):
+                        ctx.faction_specs[str(fname)] = spec
         for bid, bdata in gamedatas.get("bonus_cards", {}).items():
             btype = str(bdata.get("bonus_type", ""))
             ctx.bonus_id_to_type[str(bid)] = btype
@@ -155,27 +169,25 @@ class TerraMysticaParser:
             ctx.scoring_type_to_name[stype] = SCORING_TYPE_NAMES.get(stype, f"scoring_{stype}")
         for ftype in gamedatas.get("favor_tile_types", {}):
             ctx.favor_type_to_name[str(ftype)] = FAVOR_TYPE_NAMES.get(str(ftype), f"favor_{ftype}")
-        # Build BGA bts_id -> standard hex label (skip rivers, renumber per row)
-        bts = gamedatas.get("board_terrain_spaces", {})
-        if bts:
-            from collections import defaultdict
-            rows = defaultdict(list)
-            for bts_id, s in bts.items():
-                rows[bts_id[0]].append((int(s["bts_x"]), bts_id, s["bts_terrain"]))
-            for row in rows:
-                num = 1
-                for _, bts_id, terrain in sorted(rows[row]):
-                    if terrain != "river":
-                        ctx.hex_map[bts_id] = f"{row}{num}"
-                        num += 1
-        # Build bbs_id -> (sequential_a, sequential_b) for bridge slots.
-        # board_bridge_spaces uses RAW bts_id labels; convert via hex_map.
+        # Decoder for the skip-rivers labels BGA prints in bridge log text.
+        from collections import defaultdict
+        rows = defaultdict(list)
+        for bts_id, s in gamedatas.get("board_terrain_spaces", {}).items():
+            rows[bts_id[0]].append((int(s["bts_x"]), bts_id, s["bts_terrain"]))
+        for row, cells in rows.items():
+            num = 1
+            for _, bts_id, terrain in sorted(cells):
+                if terrain != "river":
+                    ctx.log_label_to_bts[f"{row}{num}"] = bts_id
+                    num += 1
+        # Bridge slots: bbs_id -> (bts_id, bts_id) of the two spaces it joins.
+        # Hex labels are BGA's own bts_id, so there is no label mapping.
         bbs = gamedatas.get("board_bridge_spaces", {})
         for slot_id, slot in bbs.items():
             up = slot.get("bts_id_up")
             down = slot.get("bts_id_down")
-            if up and down and up in ctx.hex_map and down in ctx.hex_map:
-                ctx.bbs_map[str(slot_id)] = (ctx.hex_map[up], ctx.hex_map[down])
+            if up and down:
+                ctx.bbs_map[str(slot_id)] = (str(up), str(down))
 
     # -------------------------------------------------------------------
     # Main parse entry point
@@ -260,6 +272,21 @@ class TerraMysticaParser:
                 if not isinstance(args, dict):
                     continue
 
+                # Turn boundary: state 41 is the active player's main-action
+                # state, entered once per turn. A re-entry by the same player
+                # with nothing logged since (undo) is not a new turn.
+                if etype == "gameStateChange":
+                    if str(args.get("id")) == "41":
+                        active = str(args.get("active_player", ""))
+                        if (ctx.turn_number == 0 or ctx.turn_has_rows
+                                or active != ctx.turn_player):
+                            ctx.turn_number += 1
+                        ctx.turn_player = active
+                        ctx.turn_has_rows = False
+                        ctx.turn_sh_marker = None
+                    leech_state_change(args, ctx)
+                    continue
+
                 # Phase/round detection via incomePhase
                 if etype == "incomePhase" or (etype == "justAMessage" and "Income phase" in event.get("log", "")):
                     self._handle_income_phase(args, ctx)
@@ -301,6 +328,18 @@ class TerraMysticaParser:
                                 ctx.starting_vp[pid] = svp
                                 if pid in ctx.player_states:
                                     ctx.player_states[pid].score = svp
+                    if "declines getting Power via Structures" in log_text:
+                        p_name = args.get("player_name", "")
+                        dec_pid = str(args.get("player_id") or next(
+                            (pid for pid, name in ctx.player_map.items()
+                             if name == p_name), ""))
+                        leech_response(ctx, dec_pid, "decline")
+                        continue
+                    if "(Alchemists Ability)" in log_text and "converts" in log_text:
+                        move = handle_alchemists_conversion(event, args, ctx)
+                        if move:
+                            moves.append(move)
+                        continue
                     if "Action phase" in log_text:
                         ctx.current_phase = "action"
                         continue
@@ -311,6 +350,8 @@ class TerraMysticaParser:
                             pid: TMPlayerState(**st.__dict__)
                             for pid, st in ctx.player_states.items()
                         }
+                        apply_alch_cashout(
+                            ctx.round_end_states[ctx.current_round], ctx)
                         # Save round data and take resource snapshot HERE,
                         # before cult bonuses fire. Cult bonus resources will
                         # accumulate after the snapshot and carry into the
@@ -318,39 +359,27 @@ class TerraMysticaParser:
                         if ctx.current_round > 0:
                             self._save_round_data(ctx)
                         continue
-                    elif "final scoring" in log_text.lower():
+                    # Only after round 1 has started: setup messages such as
+                    # "Fire and Ice - Final Scoring tiles: ..." also match.
+                    elif "final scoring" in log_text.lower() and ctx.current_round > 0:
                         if ctx.current_round > 0:
                             if ctx.current_round not in ctx.round_end_states:
                                 ctx.round_end_states[ctx.current_round] = {
                                     pid: TMPlayerState(**st.__dict__)
                                     for pid, st in ctx.player_states.items()
                                 }
+                                apply_alch_cashout(
+                                    ctx.round_end_states[ctx.current_round], ctx)
                             if ctx.current_round not in ctx.all_round_income:
                                 self._save_round_data(ctx)
                         ctx.current_phase = "final_scoring"
                         continue
 
-                # Cult bonus spades (updateCounters with "Cult bonus" in log)
+                # Cult bonus spades (updateCounters with "Cult bonus" in log).
+                # Amount comes from spade_income; the spades_count counter is
+                # only populated in 2022-24 replays.
                 if etype == "updateCounters" and "Cult bonus" in event.get("log", ""):
-                    pid = str(args.get("player_id", ""))
-                    counters = args.get("counters", {})
-                    # Counter keys are "spades_count_PLAYERID"
-                    spade_key = f"spades_count_{pid}"
-                    sc_data = counters.get(spade_key, {})
-                    spades = 0
-                    if isinstance(sc_data, dict):
-                        sc = sc_data.get("counter_value")
-                        if sc is not None and sc != "0" and sc != 0:
-                            try:
-                                spades = int(sc)
-                            except (ValueError, TypeError):
-                                pass
-                    if spades > 0:
-                        cb = ctx.round_cult_bonus.setdefault(
-                            pid, {"coins": 0, "workers": 0, "priests": 0,
-                                  "power": 0, "spades": 0})
-                        cb["spades"] += spades
-                        _gen(ctx, pid, spades=spades)
+                    add_cult_bonus_spades(args, str(args.get("player_id", "")), ctx)
 
                 # Dispatch to handler
                 handler = EVENT_HANDLERS.get(etype)
@@ -362,7 +391,10 @@ class TerraMysticaParser:
                 # Always sync counters
                 if "counters" in args and isinstance(args["counters"], dict):
                     update_counters(args["counters"], ctx)
+                sync_workers(args, ctx)
+                sync_priests(args, ctx)
 
+        leech_close(ctx)
         if ctx.current_round > 0 and ctx.current_round not in ctx.all_round_income:
             self._save_round_data(ctx)
         return moves
@@ -371,8 +403,12 @@ class TerraMysticaParser:
         pid = args.get("player_id")
         if not pid:
             # Round data is saved at cleanup phase, not here.
+            leech_close(ctx)
             ctx.current_round += 1
             ctx.current_phase = "income"
+            ctx.turn_number = 0
+            ctx.turn_player = ""
+            ctx.turn_has_rows = False
             ctx.pass_counter = 0
             ctx.pass_order = {}
             ctx.round_income = {}
@@ -410,6 +446,8 @@ class TerraMysticaParser:
                     _gen(ctx, ipid, **{res_key: amount})
             if "counters" in args and isinstance(args["counters"], dict):
                 update_counters(args["counters"], ctx)
+            sync_workers(args, ctx)
+            sync_priests(args, ctx)
 
     def _save_round_data(self, ctx: ParseContext):
         rnd = ctx.current_round
@@ -512,6 +550,7 @@ class TerraMysticaParser:
             moves=moves,
             round_summaries=round_summaries,
             auction_bids=auction_bids,
+            leech_offers=ctx.leech_offers,
             scoring_tiles=scoring_tiles,
             bonus_cards=bonus_cards,
         )
@@ -540,6 +579,7 @@ class TerraMysticaParser:
             rnd_cb = ctx.all_round_cult_bonus.get(rnd, {})
             rnd_gen = ctx.all_round_res_generated.get(rnd, {})
             rnd_spent = ctx.all_round_res_spent.get(rnd, {})
+            rnd_conv = ctx.all_round_res_converted.get(rnd, {})
             rnd_vp_leach = ctx.all_round_vp_leach.get(rnd, {})
             rnd_vp_faction = ctx.all_round_vp_faction.get(rnd, {})
 
@@ -553,6 +593,7 @@ class TerraMysticaParser:
                 cb = rnd_cb.get(pid, {})
                 gen = rnd_gen.get(pid, {})
                 spent = rnd_spent.get(pid, {})
+                conv = rnd_conv.get(pid, {})
 
                 s = TMRoundSummary(
                     round_number=rnd, player_id=pid, player_name=name,
@@ -588,6 +629,10 @@ class TerraMysticaParser:
                     spades_generated=gen.get("spades", 0),
                     power_generated=gen.get("power", 0),
                     power_spent=spent.get("power", 0),
+                    coins_converted=conv.get("coins", 0),
+                    workers_converted=conv.get("workers", 0),
+                    priests_converted=conv.get("priests", 0),
+                    power_converted=conv.get("power", 0),
                     vp_generated=gen.get("vp", 0),
                     vp_leach_cost=rnd_vp_leach.get(pid, 0),
                     vp_faction_spent=rnd_vp_faction.get(pid, 0),

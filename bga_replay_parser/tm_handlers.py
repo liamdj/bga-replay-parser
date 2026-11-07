@@ -4,7 +4,7 @@ import re
 from typing import Dict, Optional
 
 from .tm_constants import CULT_NAMES, FACTIONS, FAVOR_TYPE_NAMES
-from .tm_models import ParseContext, TMMove, TMPlayerState
+from .tm_models import ParseContext, TMLeechOffer, TMMove, TMPlayerState
 
 
 _RESOURCE_KEYS = {
@@ -30,11 +30,13 @@ def parse_resource_html(html_str: str) -> Dict[str, int]:
 
 
 def extract_hex(args: Dict, ctx=None) -> Optional[str]:
-    """Extract hex coordinate from event args, translated to standard map labels.
+    """Extract the hex label from event args.
 
-    BGA stores coordinates in bts_id (most events) or new_struct.bts_id (upgrades).
-    If ctx.hex_map is available, translates from BGA internal coords to standard
-    map labels (rivers skipped, hexes numbered sequentially per row).
+    BGA stores it in bts_id (most events) or new_struct.bts_id (upgrades). It is
+    used as is: row letter A-I plus the position in the row counting every
+    space, land and river alike (A1..A13, B1..B12, ...). Land and river spaces
+    are labelled the same way. (The `[E3]` labels BGA prints in its log text
+    skip rivers and number river spaces ambiguously, so they are not used.)
     """
     bts_id = args.get("bts_id")
     if not bts_id:
@@ -43,10 +45,7 @@ def extract_hex(args: Dict, ctx=None) -> Optional[str]:
             bts_id = new_struct["bts_id"]
     if not bts_id:
         return None
-    bts_id = str(bts_id)
-    if ctx and ctx.hex_map:
-        return ctx.hex_map.get(bts_id, bts_id)
-    return bts_id
+    return str(bts_id)
 
 
 def inc_round_action(ctx: ParseContext, pid: str, action: str):
@@ -98,9 +97,13 @@ def _sync_score(args, pid, ctx):
 def _make_move(ctx, pid, **kwargs):
     """Create a TMMove with common fields filled from context."""
     ctx.move_counter += 1
+    in_turn = ctx.current_phase == "action" and ctx.turn_number > 0
+    if in_turn:
+        ctx.turn_has_rows = True
     return TMMove(
         move_number=ctx.move_counter,
         round_number=ctx.current_round,
+        turn_number=ctx.turn_number if in_turn else None,
         phase=ctx.current_phase,
         player_id=pid,
         player_name=ctx.player_map.get(pid, ""),
@@ -113,6 +116,18 @@ def _make_move(ctx, pid, **kwargs):
 # Setup handlers
 # ---------------------------------------------------------------------------
 
+def init_starting_cults(ctx, pid, faction):
+    """Set a player's cult positions to their faction's starting ones (from the
+    game's own faction specs, `<cult>cult_setup`). BGA logs no event for them;
+    choices made during setup (e.g. Djinn) arrive later as advanceCultTrack."""
+    spec = ctx.faction_specs.get(faction)
+    st = ctx.player_states.get(pid)
+    if not spec or st is None:
+        return
+    for cult in ("fire", "water", "earth", "air"):
+        setattr(st, f"cult_{cult}", _safe_int(spec.get(f"{cult}cult_setup")) or 0)
+
+
 def handle_faction_selected(event, args, ctx):
     pid = str(args.get("player_id", ""))
     name = args.get("player_name", "")
@@ -120,6 +135,7 @@ def handle_faction_selected(event, args, ctx):
     ctx.factions[pid] = args.get("faction_type", "")
     ctx.terrains[pid] = args.get("faction_terrain_type", "")
     ctx.player_states.setdefault(pid, TMPlayerState())
+    init_starting_cults(ctx, pid, ctx.factions[pid])
     ctx.structures.setdefault(pid, {})
     ctx.player_favor_tiles.setdefault(pid, [])
     ctx.player_town_tiles.setdefault(pid, [])
@@ -151,6 +167,7 @@ def handle_faction_board_swapped(event, args, ctx):
     ctx.player_favor_tiles.setdefault(pid, [])
     ctx.player_town_tiles.setdefault(pid, [])
     ctx.vp_sources.setdefault(pid, {})
+    init_starting_cults(ctx, pid, ctx.factions[pid])
     return None
 
 
@@ -179,12 +196,17 @@ def handle_dwelling_placed(event, args, ctx):
     inc_round_action(ctx, pid, "dwellings_built")
     cost_w = parse_resource_html(args.get("workers_cost", "")).get("workers", 0)
     cost_c = parse_resource_html(args.get("coins_cost", "")).get("coins", 0)
-    _spend(ctx, pid, workers=cost_w, coins=cost_c)
+    # other_cost = range-extension surcharge (Dwarves tunneling, Fakirs carpet flight)
+    other = parse_resource_html(args.get("other_cost", ""))
+    cost_w += other.get("workers", 0)
+    cost_c += other.get("coins", 0)
+    cost_p = other.get("priests", 0)
+    _spend(ctx, pid, workers=cost_w, coins=cost_c, priests=cost_p)
     return _make_move(ctx, pid,
         action_type="place_initial_dwelling" if ctx.current_round == 0 else "build_dwelling",
         description=args.get("struct_name", "Dwelling"),
         hex_coord=hex_coord, structure_type="dwelling",
-        cost_workers=cost_w, cost_coins=cost_c,
+        cost_workers=cost_w, cost_coins=cost_c, cost_priests=cost_p,
     )
 
 
@@ -213,14 +235,17 @@ def handle_terrain_transformed(event, args, ctx):
     title_match = re.search(r"title='(\w+)'", args.get("orig", ""))
     if title_match:
         terrain_from = title_match.group(1)
-    # transform_cost = spades icon; other_cost = workers/priests spent
+    # transform_cost = spades icon; other_cost = resources spent for them
+    # (workers/priests; coins or power for some fan factions)
     spades = parse_resource_html(
         args.get("transform_cost", "")).get("spade", 0)
     other = parse_resource_html(args.get("other_cost", ""))
     w_cost = other.get("workers", 0)
     p_cost = other.get("priests", 0)
-    # Workers/priests spent to generate spades
-    _spend(ctx, pid, workers=w_cost, priests=p_cost)
+    c_cost = other.get("coins", 0)
+    pw_cost = other.get("power", 0)
+    # Resources spent to generate spades
+    _spend(ctx, pid, workers=w_cost, priests=p_cost, coins=c_cost, power=pw_cost)
     _gen(ctx, pid, spades=spades)
     inc_round_action(ctx, pid, "terrain_transforms")
     return _make_move(ctx, pid,
@@ -230,6 +255,7 @@ def handle_terrain_transformed(event, args, ctx):
         terrain_from=terrain_from, terrain_to=terrain_to,
         spades_used=spades or None,
         cost_workers=w_cost, cost_priests=p_cost,
+        cost_coins=c_cost, cost_power=pw_cost,
     )
 
 
@@ -246,9 +272,15 @@ def handle_structure_upgraded(event, args, ctx):
               if isinstance(new_struct, dict) else "")
     if pid in ctx.structures and bts_id:
         ctx.structures[pid][bts_id] = new_type
-    cost = parse_resource_html(args.get("resource_cost", ""))
-    w, c = cost.get("workers", 0), cost.get("coins", 0)
-    _spend(ctx, pid, workers=w, coins=c)
+    # Cost is one combined resource_cost field since mid-2022; older replays
+    # split it into workers_cost + coins_cost.
+    if args.get("resource_cost"):
+        cost = parse_resource_html(args["resource_cost"])
+    else:
+        cost = parse_resource_html(
+            str(args.get("workers_cost") or "") + str(args.get("coins_cost") or ""))
+    w, c, p = cost.get("workers", 0), cost.get("coins", 0), cost.get("priests", 0)
+    _spend(ctx, pid, workers=w, coins=c, priests=p)
     inc_round_action(ctx, pid, "structures_upgraded")
     if new_type:
         inc_round_action(ctx, pid, f"{new_type}_built")
@@ -257,7 +289,7 @@ def handle_structure_upgraded(event, args, ctx):
         description=(f"Upgrade {args.get('old_struct_name', old_type)}"
                      f" to {args.get('new_struct_name', new_type)}"),
         hex_coord=hex_coord, structure_type=new_type,
-        upgraded_from=old_type, cost_workers=w, cost_coins=c,
+        upgraded_from=old_type, cost_workers=w, cost_coins=c, cost_priests=p,
     )
 
 
@@ -271,6 +303,7 @@ def handle_advance_cult(event, args, ctx):
         setattr(ctx.player_states[pid], f"cult_{cult_name}", final)
     # Free cult bumps (Cultists Ability, Favor Tile) don't count as actions
     addendum = str(args.get("addendum", ""))
+    ctx.last_cult_source[pid] = addendum
     is_free = "Cultists Ability" in addendum or "Favor Tile" in addendum
     if not is_free:
         inc_round_action(ctx, pid, "cult_advances")
@@ -332,7 +365,9 @@ def handle_power_action(event, args, ctx):
         label = "priest"
     else:
         label = "unknown"
-    _spend(ctx, pid, power=pw_cost)
+    # power_cost holds coins when a fan faction pays the power action in coins
+    c_cost = cost.get("coins", 0)
+    _spend(ctx, pid, power=pw_cost, coins=c_cost)
     _gen(ctx, pid, workers=g_w, coins=g_c, priests=g_p)
     if spades > 0:
         _gen(ctx, pid, spades=spades)
@@ -342,7 +377,7 @@ def handle_power_action(event, args, ctx):
         action_type="power_action",
         description=f"Power action: {label}",
         power_action_type=label,
-        cost_power=pw_cost,
+        cost_power=pw_cost, cost_coins=c_cost,
         gain_workers=g_w, gain_coins=g_c, gain_priests=g_p,
     )
 
@@ -350,7 +385,16 @@ def handle_power_action(event, args, ctx):
 def handle_power_action_bridge(event, args, ctx):
     pid = str(args.get("player_id", ""))
     cost = parse_resource_html(args.get("power_cost", ""))
-    _spend(ctx, pid, power=cost.get("power", 0))
+    log = event.get("log", "") if isinstance(event, dict) else ""
+    # workers_cost is populated on every bridge event but only charged for
+    # ability bridges (Engineers: workers; Architects: a priest), whose log
+    # template is the one that references it.
+    alt = (parse_resource_html(args.get("workers_cost", ""))
+           if "${workers_cost}" in log else {})
+    cost_w, cost_p = alt.get("workers", 0), alt.get("priests", 0)
+    cost_c = cost.get("coins", 0)   # fan factions paying power actions in coins
+    _spend(ctx, pid, power=cost.get("power", 0), coins=cost_c,
+           workers=cost_w, priests=cost_p)
     inc_round_action(ctx, pid, "power_actions_used")
     inc_round_action(ctx, pid, "bridges_built")
     ctx.round_power_actions.setdefault(pid, []).append("bridge")
@@ -362,26 +406,58 @@ def handle_power_action_bridge(event, args, ctx):
         inc_vp_source(ctx, pid, "vp_faction_ability", vp)
         _gen(ctx, pid, vp=vp)
     _sync_score(args, pid, ctx)
-    # Bridge endpoints — two cases:
-    #   Power action bridge: log has "[HEXA-HEXB]" using SEQUENTIAL labels already
-    #   Engineers ability bridge: log has no [X-Y]; use bbs_id from args via ctx.bbs_map
+    # Bridge endpoints. A power-action bridge's log text carries "[D6-E9]" in
+    # BGA's skip-rivers notation (decoded to bts_id here); ability bridges
+    # (Engineers etc.) have no such text, so use the bridge slot (bbs_id).
+    # The two sources disagree for ~9% of bridges (see parser.md).
     hex_a = hex_b = None
-    log = event.get("log", "") if isinstance(event, dict) else ""
-    import re as _re
-    m = _re.search(r'\[([A-Z]\d+)-([A-Z]\d+)\]', log)
-    if m:
-        hex_a, hex_b = m.group(1), m.group(2)
+    m = re.search(r'\[([A-I]\d+)-([A-I]\d+)\]', log)
+    if m and m.group(1) in ctx.log_label_to_bts and m.group(2) in ctx.log_label_to_bts:
+        hex_a = ctx.log_label_to_bts[m.group(1)]
+        hex_b = ctx.log_label_to_bts[m.group(2)]
     else:
         bbs_id = args.get("bbs_id")
-        if bbs_id is not None and str(bbs_id) in ctx.bbs_map:
-            hex_a, hex_b = ctx.bbs_map[str(bbs_id)]
+        if bbs_id is not None:
+            hex_a, hex_b = ctx.bbs_map.get(str(bbs_id), (None, None))
     return _make_move(ctx, pid,
         action_type="power_action",
         description="Power action: bridge",
         power_action_type="bridge",
         hex_coord=hex_a, secondary_hex=hex_b,
         cost_power=cost.get("power", 0),
+        cost_workers=cost_w, cost_priests=cost_p, cost_coins=cost_c,
     )
+
+
+# Cult-step addendum -> special_action_type, for specialActionUsed events with
+# no favor/bonus id (they close the cult step logged just before them)
+_CULT_STEP_SOURCES = {"Cultists Ability": "cultists_ability",
+                      "Auren Stronghold": "stronghold",
+                      "Goblins ability": "goblins_ability"}
+
+
+def stronghold_marker(ctx, pid):
+    """The current turn's stronghold-action row for pid, if any."""
+    m = ctx.turn_sh_marker
+    return m[1] if m and m[0] == pid else None
+
+
+def handle_action_used(event, args, ctx):
+    """actionUsed with stronghold=true marks a stronghold action (logged before
+    its effect for most factions, after it for Architects / Children of the
+    Wyrm). Emit one special_action row per turn; Chaos Magicians' double
+    action shows up here too."""
+    if not args.get("stronghold"):
+        return None
+    pid = str(args.get("player_id", ""))
+    if not pid or stronghold_marker(ctx, pid) is not None:
+        return None
+    move = _make_move(ctx, pid,
+        action_type="special_action",
+        description="Special action (stronghold)",
+        special_action_type="stronghold")
+    ctx.turn_sh_marker = (pid, move)
+    return move
 
 
 def handle_special_action(event, args, ctx):
@@ -391,6 +467,11 @@ def handle_special_action(event, args, ctx):
         source = "favor"
     elif args.get("bonus_id") and str(args["bonus_id"]) != "0":
         source = "bonus"
+    else:
+        addendum = ctx.last_cult_source.get(pid, "")
+        source = next((v for k, v in _CULT_STEP_SOURCES.items() if k in addendum), "")
+        if source == "stronghold" and stronghold_marker(ctx, pid) is not None:
+            return None     # Auren: the stronghold row is already there
     return _make_move(ctx, pid,
         action_type="special_action",
         description=f"Special action ({source})" if source else "Special action",
@@ -441,10 +522,12 @@ def handle_town_founded(event, args, ctx):
     town_id = str(args.get("town_id", ""))
     inc_round_action(ctx, pid, "towns_founded")
     ctx.last_town_id = town_id
-    return _make_move(ctx, pid,
+    move = _make_move(ctx, pid,
         action_type="found_town", description="Found town",
         hex_coord=hex_coord, town_id=town_id,
     )
+    ctx.last_town_move = move
+    return move
 
 
 def handle_town_bonus(event, args, ctx):
@@ -464,6 +547,12 @@ def handle_town_bonus(event, args, ctx):
     town_name = "_".join(parts)
     ctx.player_town_tiles.setdefault(pid, []).append(
         town_name or f"town_{town_id}")
+    # Fill the found_town row this bonus belongs to (townBonus follows it)
+    tm = ctx.last_town_move
+    if tm is not None and tm.player_id == pid and tm.town_vp is None:
+        tm.town_vp = vp
+        tm.town_resources = "_".join(parts[1:])
+        tm.tile_or_card = town_name
     _gen(ctx, pid,
          coins=coins, workers=workers, priests=priests,
          power=power, vp=vp)
@@ -508,7 +597,11 @@ def handle_bonus_card(event, args, ctx):
 # ---------------------------------------------------------------------------
 
 def handle_player_passed(event, args, ctx):
+    # Also handles firstPlayerChanged: in rounds 1-5 the first player to pass
+    # gets that event instead of playerPassed.
     pid = str(args.get("player_id", ""))
+    if pid in ctx.pass_order:
+        return None
     ctx.pass_counter += 1
     ctx.pass_order[pid] = ctx.pass_counter
     return _make_move(ctx, pid, action_type="pass", description="Pass")
@@ -604,14 +697,15 @@ def handle_final_scoring(event, args, ctx):
     )
 
 
-def handle_some_income(event, args, ctx):
+def handle_some_income(event, args, ctx, is_cult_bonus=None):
     pid = str(args.get("player_id", ""))
     coins = parse_resource_html(args.get("coins_income", "")).get("coins", 0)
     workers = parse_resource_html(args.get("workers_income", "")).get("workers", 0)
     priests = parse_resource_html(args.get("priests_income", "")).get("priests", 0)
     power = parse_resource_html(args.get("power_income", "")).get("power", 0)
 
-    is_cult_bonus = "Cult bonus" in str(args.get("addendum", ""))
+    if is_cult_bonus is None:
+        is_cult_bonus = "Cult bonus" in str(args.get("addendum", ""))
     if is_cult_bonus:
         cb = ctx.round_cult_bonus.setdefault(
             pid, {"coins": 0, "workers": 0, "priests": 0,
@@ -643,6 +737,31 @@ def handle_some_income(event, args, ctx):
     )
 
 
+def add_cult_bonus_spades(args, pid, ctx):
+    """Record cult-bonus spades from the spade_income arg; returns the amount."""
+    spades = parse_resource_html(args.get("spade_income", "")).get("spade", 0)
+    if spades > 0:
+        cb = ctx.round_cult_bonus.setdefault(
+            pid, {"coins": 0, "workers": 0, "priests": 0,
+                  "power": 0, "spades": 0})
+        cb["spades"] += spades
+        _gen(ctx, pid, spades=spades)
+    return spades
+
+
+def handle_cult_bonus(event, args, ctx):
+    """Pre-mid-2022 cult bonus event (later replays use someIncome with a
+    "(Cult bonus)" addendum, plus updateCounters for spades). Fires once per
+    cult-bonus slot per player, mostly with all-zero amounts."""
+    pid = str(args.get("player_id", ""))
+    add_cult_bonus_spades(args, pid, ctx)
+    if not any(parse_resource_html(args.get(f, "")).get(r, 0)
+               for r, f in [("coins", "coins_income"), ("workers", "workers_income"),
+                            ("priests", "priests_income"), ("power", "power_income")]):
+        return None
+    return handle_some_income(event, args, ctx, is_cult_bonus=True)
+
+
 def handle_conversions(event, args, ctx):
     pid = str(args.get("player_id", ""))
     new_score = args.get("newScore")
@@ -656,10 +775,19 @@ def handle_conversions(event, args, ctx):
             # - Positive during action phase: scoring tile VP triggered
             #   alongside conversions (round scoring)
             # - Positive during final_scoring: resource→VP (resource scoring)
+            # - Positive, announced by a preceding Alchemists coins→VP
+            #   message: their 2:1 resource scoring, not round scoring
+            alch_vp = min(ctx.alch_vp_pending.pop(pid, 0), max(vp_delta, 0))
+            if alch_vp:
+                inc_vp_source(ctx, pid, "vp_resources_final", alch_vp)
+                _gen(ctx, pid, vp=alch_vp)
+                vp_delta -= alch_vp
             if vp_delta < 0:
                 inc_vp_source(ctx, pid, "vp_faction_ability", vp_delta)
                 _spend(ctx, pid, vp=-vp_delta)
                 ctx.round_vp_faction[pid] = ctx.round_vp_faction.get(pid, 0) + (-vp_delta)
+            elif vp_delta == 0:
+                pass
             elif ctx.current_phase == "final_scoring":
                 inc_vp_source(ctx, pid, "vp_resources_final", vp_delta)
                 _gen(ctx, pid, vp=vp_delta)
@@ -671,12 +799,14 @@ def handle_conversions(event, args, ctx):
                     ctx.round_scoring_vp[pid] += vp_delta
 
     # Track resource conversions (net per resource)
+    cost, gain = {}, {}
     for res, field in [("power", "power_spent"),
                        ("workers", "workers_spent"),
                        ("priests", "priests_spent")]:
         amt = parse_resource_html(
             args.get(field, "")).get(res, 0)
         if amt > 0:
+            cost[res] = amt
             _convert(ctx, pid, **{res: -amt})
     for res, field in [("coins", "coins_gained"),
                        ("workers", "workers_gained"),
@@ -684,8 +814,124 @@ def handle_conversions(event, args, ctx):
         amt = parse_resource_html(
             args.get(field, "")).get(res, 0)
         if amt > 0:
+            gain[res] = amt
             _convert(ctx, pid, **{res: amt})
-    return None
+    # Most conversionsApplied events are empty score/counter carriers
+    if not cost and not gain:
+        return None
+    return _make_move(ctx, pid,
+        action_type="convert",
+        description="Convert {} -> {}".format(
+            ", ".join(f"{v} {k}" for k, v in cost.items()),
+            ", ".join(f"{v} {k}" for k, v in gain.items())),
+        cost_power=cost.get("power", 0), cost_workers=cost.get("workers", 0),
+        cost_priests=cost.get("priests", 0),
+        gain_coins=gain.get("coins", 0), gain_workers=gain.get("workers", 0),
+        gain_priests=gain.get("priests", 0),
+    )
+
+
+def handle_alchemists_conversion(event, args, ctx):
+    """Alchemists ability, logged as a justAMessage.
+
+    1 VP -> 1 coin (vp_spent/coins_gained) is a conversion: books the coins
+    and emits a row; the VP side is bucketed by the conversionsApplied event
+    that always follows (it carries newScore).
+
+    2 coins -> 1 VP (coins_spent/vp_gained) is treated as end-game resource
+    scoring at 2:1 rather than a conversion: no row, no coins_converted, VP
+    into vp_resources_final, and round-end snapshots are taken as if it had
+    not happened yet (see apply_alch_cashout)."""
+    pid = str(args.get("player_id", ""))
+    vp_spent = parse_resource_html(args.get("vp_spent", "")).get("vp", 0)
+    c_gain = parse_resource_html(args.get("coins_gained", "")).get("coins", 0)
+    c_spent = parse_resource_html(args.get("coins_spent", "")).get("coins", 0)
+    vp_gain = parse_resource_html(args.get("vp_gained", "")).get("vp", 0)
+    if not (vp_spent or c_gain or c_spent or vp_gain):
+        return None
+    if vp_gain or c_spent:
+        ctx.alch_vp_pending[pid] = ctx.alch_vp_pending.get(pid, 0) + vp_gain
+        cash = ctx.alch_cashout.setdefault(pid, [0, 0])
+        cash[0] += c_spent
+        cash[1] += vp_gain
+    if not (vp_spent or c_gain):
+        return None
+    _convert(ctx, pid, coins=c_gain)
+    return _make_move(ctx, pid,
+        action_type="convert",
+        description=f"Alchemists: {vp_spent} vp -> {c_gain} coins",
+        gain_coins=c_gain, gain_vp=-vp_spent,
+    )
+
+
+def apply_alch_cashout(states: Dict[str, TMPlayerState], ctx: ParseContext):
+    """Put Alchemists' cashed-out coins back (and take the VP off) in a
+    round-end snapshot: that trade is scored as end-game resource scoring."""
+    for pid, (coins, vp) in ctx.alch_cashout.items():
+        if pid in states:
+            states[pid].coins += coins
+            states[pid].score -= vp
+
+
+# ---------------------------------------------------------------------------
+# Leech offers
+# ---------------------------------------------------------------------------
+# A leech phase runs from game state 44 (active_player = the builder) to the
+# next one or the next round. Inside it: accept events (a free 1-power leech
+# is auto-accepted, logged before the offer and sometimes with no offer at
+# all), at most one offer listing who must decide, and decline messages.
+
+def leech_close(ctx):
+    """Finish the open leech phase, turning it into TMLeechOffer rows."""
+    ph = ctx.leech_phase
+    ctx.leech_phase = None
+    if ph is None:
+        return
+    targets = {}
+    for t, (off, cap) in ph["offers"].items():
+        targets[t] = (off, cap, 0) + ph["resp"].get(t, ("none", 0, 0))
+    for t, resp in ph["resp"].items():
+        if t not in targets:   # auto-accepted, never listed as an offer
+            targets[t] = (resp[1], 0, 1) + resp
+    n = sum(1 for v in targets.values() if v[0] > 0)
+    for t, (off, cap, auto, resp, gained, vp) in targets.items():
+        ctx.leech_offers.append(TMLeechOffer(
+            offer_id=ph["offer_id"], round_number=ph["round"],
+            turn_number=ph["turn"], builder_id=ph["builder"], target_id=t,
+            n_offered=n, offered=off, cap=cap, auto=auto,
+            response=resp, gained=gained, vp_cost=vp))
+
+
+def leech_state_change(args, ctx):
+    """Feed a gameStateChange: state 44 opens a phase; a state whose inner
+    args carry power_bonuses/power_caps is the offer."""
+    if str(args.get("id")) == "44":
+        leech_close(ctx)
+        ctx.leech_counter += 1
+        ctx.leech_phase = {
+            "offer_id": ctx.leech_counter, "round": ctx.current_round,
+            "turn": ctx.turn_number or None,
+            "builder": str(args.get("active_player", "")),
+            "offers": {}, "resp": {}}
+        return
+    inner = args.get("args")
+    if (ctx.leech_phase is None or not isinstance(inner, dict)
+            or not isinstance(inner.get("power_bonuses"), dict)):
+        return
+    caps = inner.get("power_caps")
+    caps = caps if isinstance(caps, dict) else {}
+    for t, amount in inner["power_bonuses"].items():
+        ctx.leech_phase["offers"][str(t)] = (
+            _safe_int(amount) or 0, _safe_int(caps.get(t)) or 0)
+
+
+def leech_response(ctx, pid, response, gained=0, vp_cost=0):
+    ph = ctx.leech_phase
+    if ph is None or pid in ph["resp"] or pid == ph["builder"]:
+        return
+    if response == "decline" and pid not in ph["offers"]:
+        return
+    ph["resp"][pid] = (response, gained, vp_cost)
 
 
 def handle_power_via_structures(event, args, ctx):
@@ -695,6 +941,10 @@ def handle_power_via_structures(event, args, ctx):
         args.get("power_income", "")).get("power", 0)
     vp_cost = parse_resource_html(
         args.get("vp_price", "")).get("vp", 0)
+    log = event.get("log", "") if isinstance(event, dict) else ""
+    if " gets " in log or " pays " in log:
+        leech_response(ctx, pid, "accept", pw,
+                       vp_cost if " pays " in log else 0)
     new_score = args.get("newScore")
     if new_score is not None and pid in ctx.player_states:
         prev = ctx.player_states[pid].score
@@ -728,6 +978,31 @@ def handle_power_via_structures(event, args, ctx):
 def handle_update_counters(event, args, ctx):
     if "counters" in args and isinstance(args["counters"], dict):
         update_counters(args["counters"], ctx)
+    # Some faction abilities are only logged on an updateCounters event.
+    log = event.get("log", "") if isinstance(event, dict) else ""
+    if not log:
+        return None
+    pid = str(args.get("player_id", ""))
+    if "${coins_bonus}" in log:      # Conspirators ability
+        _gen(ctx, pid, coins=parse_resource_html(
+            args.get("coins_bonus", "")).get("coins", 0))
+    elif "${coins_gain}" in log:     # Gold Diggers stronghold action
+        coins = parse_resource_html(args.get("coins_gain", "")).get("coins", 0)
+        _gen(ctx, pid, coins=coins)
+        marker = stronghold_marker(ctx, pid)
+        if marker is not None:
+            marker.gain_coins += coins
+            return None
+        move = _make_move(ctx, pid,
+            action_type="special_action",
+            description="Special action (stronghold)",
+            special_action_type="stronghold", gain_coins=coins)
+        ctx.turn_sh_marker = (pid, move)
+        return move
+    elif "Spades to transform" in log:   # Wisps ability, Halflings stronghold
+        m = re.search(r"gains (\d+) Spades", log)
+        _gen(ctx, pid, spades=_safe_int(args.get("nb_spades"))
+             or (int(m.group(1)) if m else 0))
     return None
 
 
@@ -788,6 +1063,51 @@ def update_counters(counters: Dict, ctx: ParseContext):
             setattr(st, attr, val)
 
 
+def sync_workers(args: Dict, ctx: ParseContext):
+    """Update each player's worker stock from the event's `workers` tokens.
+
+    BGA has no workers counter: workers are 65 tokens, sent as
+    {worker_id: {"player_id": owner-or-None}}. Build/upgrade/transform events
+    carry all of them; income, bonus, conversion and power-action events carry
+    only the tokens that moved. So keep an owner per token and count."""
+    tokens = args.get("workers")
+    if not isinstance(tokens, dict) or not tokens:
+        return
+    for tid, tok in tokens.items():
+        if isinstance(tok, dict) and "player_id" in tok:
+            owner = tok["player_id"]
+            ctx.worker_tokens[str(tid)] = None if owner is None else str(owner)
+    held: Dict[str, int] = {}
+    for owner in ctx.worker_tokens.values():
+        if owner is not None:
+            held[owner] = held.get(owner, 0) + 1
+    for pid, st in ctx.player_states.items():
+        st.workers = held.get(pid, 0)
+
+
+def sync_priests(args: Dict, ctx: ParseContext):
+    """Set priests in hand from the event's `priests` tokens.
+
+    Each player has 7 priest tokens. An event carries the acting player's
+    seven (all 28 at setup). In hand = out of the supply, not on a cult
+    order space, not in the Treasury."""
+    tokens = args.get("priests")
+    if not isinstance(tokens, dict) or not tokens:
+        return
+    held: Dict[str, int] = {}
+    for tok in tokens.values():
+        if not isinstance(tok, dict) or tok.get("player_id") is None:
+            continue
+        owner = str(tok["player_id"])
+        in_hand = (str(tok.get("priest_in_supply")) == "0"
+                   and tok.get("cos_id") is None
+                   and str(tok.get("priest_in_treasury", "0")) != "1")
+        held[owner] = held.get(owner, 0) + in_hand
+    for pid, n in held.items():
+        if pid in ctx.player_states:
+            ctx.player_states[pid].priests = n
+
+
 # ---------------------------------------------------------------------------
 # Fan-faction handlers
 # ---------------------------------------------------------------------------
@@ -797,12 +1117,16 @@ def handle_advance_income_track(event, args, ctx):
     # Chash Dallah's income-track advancement grants VP (1/2/3/4 for levels 1-4).
     # The trailing updateScore has score_delta=0 (no double-count).
     vp = parse_resource_html(args.get("score_inc", "")).get("vp", 0)
+    cost_w = parse_resource_html(args.get("workers_cost", "")).get("workers", 0)
+    cost_c = parse_resource_html(args.get("coins_cost", "")).get("coins", 0)
+    _spend(ctx, pid, workers=cost_w, coins=cost_c)
     if vp:
         inc_vp_source(ctx, pid, "vp_faction_ability", vp)
         _gen(ctx, pid, vp=vp)
     _sync_score(args, pid, ctx)
     return _make_move(ctx, pid, action_type="advance_income_track",
-                      description="Advance income track", gain_vp=vp)
+                      description="Advance income track",
+                      cost_workers=cost_w, cost_coins=cost_c, gain_vp=vp)
 
 
 def handle_swap_cult_track(event, args, ctx):
@@ -831,6 +1155,125 @@ def handle_add_new_bonus_card(event, args, ctx):
             ctx.bonus_type_to_name[btype] = BONUS_TYPE_NAMES.get(
                 btype, f"bonus_{btype}")
     return None
+
+
+def handle_workers_income(event, args, ctx):
+    """workersIncome: Swarmlings gain 3 workers on founding a town."""
+    pid = str(args.get("player_id", ""))
+    w = parse_resource_html(args.get("workers_income", "")).get("workers", 0)
+    _gen(ctx, pid, workers=w)
+    return None
+
+
+def handle_workers_for_priests(event, args, ctx):
+    """workersForPriests: Darklings stronghold trades up to 3 workers for priests."""
+    pid = str(args.get("player_id", ""))
+    w = parse_resource_html(args.get("workers_cost", "")).get("workers", 0)
+    pr = parse_resource_html(args.get("priests_gain", "")).get("priests", 0)
+    if not (w or pr):
+        return None
+    _convert(ctx, pid, workers=-w, priests=pr)
+    return _make_move(ctx, pid,
+        action_type="convert",
+        description=f"Darklings: {w} workers -> {pr} priests",
+        cost_workers=w, gain_priests=pr,
+    )
+
+
+def handle_gain_resources(event, args, ctx):
+    """gainRessources: Goblins spend a Treasure token, as their action, for
+    power/coins/workers per structure of a chosen type."""
+    pid = str(args.get("player_id", ""))
+    coins = parse_resource_html(args.get("coins_gain", "")).get("coins", 0)
+    workers = parse_resource_html(args.get("workers_gain", "")).get("workers", 0)
+    power = parse_resource_html(args.get("power_gain", "")).get("power", 0)
+    _gen(ctx, pid, coins=coins, workers=workers, power=power)
+    if power > 0:
+        ctx.round_power_gained.setdefault(
+            pid, {"structures": 0, "cults": 0, "other": 0})
+        ctx.round_power_gained[pid]["other"] += power
+    return _make_move(ctx, pid,
+        action_type="faction_action",
+        description="Goblins: spend Treasure token",
+        gain_coins=coins, gain_workers=workers, gain_power=power)
+
+
+def handle_gain_priests(event, args, ctx):
+    """gainPriests: Dynion Geifr gain 2 priests on building the stronghold."""
+    pid = str(args.get("player_id", ""))
+    _gen(ctx, pid, priests=parse_resource_html(
+        args.get("priests_gained", "")).get("priests", 0))
+    return None
+
+
+def handle_new_power_tokens(event, args, ctx):
+    """newPowerTokens: The Enlightened buy new power tokens (bowl 1) with
+    coins, 1:1. Children of the Wyrm use the same event with no coin cost."""
+    pid = str(args.get("player_id", ""))
+    coins = parse_resource_html(args.get("coins_spent", "")).get("coins", 0)
+    tokens = parse_resource_html(args.get("power_earned", "")).get("power", 0)
+    if coins <= 0:
+        return None
+    _convert(ctx, pid, coins=-coins)
+    return _make_move(ctx, pid,
+        action_type="convert",
+        description=f"The Enlightened: {coins} coins -> {tokens} power tokens",
+        cost_coins=coins)
+
+
+def handle_update_treasury(event, args, ctx):
+    """updateTreasury: Treasurers put resources into the Treasury.
+
+    Only "(Conversion)" deposits come off the board. The others ("(Income)",
+    "(Bonus card)", "(Town bonus)", "(Power action)") are withheld before the
+    resources arrive, and the granting event already reports the net amount.
+    The Treasury comes back doubled as a someIncome right after emptyTreasury."""
+    addendum = str(args.get("addendum", ""))
+    pid = str(args.get("player_id", ""))
+    if "Power action" in addendum:
+        return _treasury_power_action(args, pid, ctx)
+    if "Conversion" not in addendum:
+        return None
+    for res in ("coins", "workers", "priests"):
+        amt = parse_resource_html(args.get(f"{res}_income", "")).get(res, 0)
+        if amt > 0:
+            _convert(ctx, pid, **{res: -amt})
+    return None
+
+
+# Standard power actions: gained resource -> (label, power cost)
+_POWER_ACTIONS = {"priests": ("priest", 3), "workers": ("workers", 4),
+                  "coins": ("coins", 4)}
+
+
+def _treasury_power_action(args, pid, ctx):
+    """A Treasurers power action with proceeds going into the Treasury fires
+    no powerActionConvert, only this deposit. Book the power action here.
+    Nothing is generated: the deposit never reaches the board."""
+    for res, (label, pw_cost) in _POWER_ACTIONS.items():
+        dep = parse_resource_html(args.get(f"{res}_income", "")).get(res, 0)
+        if dep <= 0:
+            continue
+        _spend(ctx, pid, power=pw_cost)
+        inc_round_action(ctx, pid, "power_actions_used")
+        ctx.round_power_actions.setdefault(pid, []).append(label)
+        return _make_move(ctx, pid,
+            action_type="power_action",
+            description=f"Power action: {label} ({dep} to Treasury)",
+            power_action_type=label, cost_power=pw_cost)
+    return None
+
+
+def handle_token_placed(event, args, ctx):
+    """tokenPlaced: Children of the Wyrm stronghold action — sacrifice power
+    tokens to place them on two board spaces."""
+    pid = str(args.get("player_id", ""))
+    hexes = [str(b) for b in (args.get("bts_id_1"), args.get("bts_id_2")) if b]
+    return _make_move(ctx, pid,
+        action_type="faction_action",
+        description="Children of the Wyrm: place power tokens",
+        hex_coord=hexes[0] if hexes else None,
+        secondary_hex=hexes[1] if len(hexes) > 1 else None)
 
 
 def handle_power_income(event, args, ctx):
@@ -881,6 +1324,7 @@ EVENT_HANDLERS = {
     "finalScoring": handle_final_scoring,
     # Income & conversions
     "someIncome": handle_some_income,
+    "cultBonus": handle_cult_bonus,
     "conversionsApplied": handle_conversions,
     "conversionsAppliedWithDelay": handle_conversions,
     "powerViaStructures": handle_power_via_structures,
@@ -890,16 +1334,19 @@ EVENT_HANDLERS = {
     "advanceIncomeTrack": handle_advance_income_track,
     "swapCultTrack": handle_swap_cult_track,
     "favorTileLost": handle_favor_tile_lost,
-    "tokenPlaced": noop,
+    "tokenPlaced": handle_token_placed,
     # Silently consumed events
-    "updateTreasury": noop, "emptyTreasury": noop, "updateExchangeTrack": noop,
-    "newPowerTokens": noop, "addNewBonusCard": handle_add_new_bonus_card, "startingTerrainChosen": noop,
-    "terrainRingUpdated": noop, "someCost": noop, "gainRessources": noop,
-    "gainPriests": noop, "workersForPriests": noop, "workersIncome": noop,
+    "updateTreasury": handle_update_treasury,
+    "emptyTreasury": noop, "updateExchangeTrack": noop,
+    "newPowerTokens": handle_new_power_tokens, "addNewBonusCard": handle_add_new_bonus_card, "startingTerrainChosen": noop,
+    "terrainRingUpdated": noop, "someCost": noop,
+    "gainRessources": handle_gain_resources,
+    "gainPriests": handle_gain_priests, "workersForPriests": handle_workers_for_priests,
+    "workersIncome": handle_workers_income,
     "createSomeWorkers": noop, "createLandBridges": noop, "simpleNote": noop,
     "wakeupPlayers": noop, "newCustomBoard": noop, "powerIncome": handle_power_income,
-    "actionUsed": noop, "returnActionTokens": noop, "coinsOnBonusCards": noop,
-    "firstPlayerChanged": noop, "factionBoardChosen": noop,
+    "actionUsed": handle_action_used, "returnActionTokens": noop, "coinsOnBonusCards": noop,
+    "firstPlayerChanged": handle_player_passed, "factionBoardChosen": noop,
     "timeJokerUsed": noop, "undoRestoreDISAB": noop,
     "tileScored": noop,
 }

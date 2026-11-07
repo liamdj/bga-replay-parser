@@ -90,7 +90,8 @@ Each **log entry** has:
 
 ### Phase Events
 - `incomePhase` — start of income phase
-- `someIncome` — individual income details
+- `someIncome` — individual income details; from mid-2022 also cult bonuses (`addendum="(Cult bonus)"`)
+- `cultBonus` — cult bonus, pre-mid-2022 replays only. Fires 5× per player per cleanup, mostly all-zero. Args: `coins_income`, `workers_income`, `priests_income`, `power_income`, `spade_income`
 - `coinsOnBonusCards` — leftover bonus cards get coins
 - `playerPassed` — player passes
 - `firstPlayerChanged` — first player to pass
@@ -136,8 +137,9 @@ Each **log entry** has:
   "dest": "<div ...>",      // HTML icon for destination terrain
   "terrain_dest": "...",
   "spades_used": "...",
-  "transform_cost": "...",
-  "other_cost": "..."
+  "transform_cost": "...",   // spades icon
+  "other_cost": "..."        // resources paid for the spades: workers/priests;
+                             // coins (Gold Diggers), power (The Enlightened)
 }
 ```
 
@@ -148,7 +150,9 @@ Each **log entry** has:
   "extra": " [E3]",         // hex coordinate
   "bts_id": "E3",
   "workers_cost": "<div ...workers_amount'>1</div>...",
-  "coins_cost": "<div ...coins_amount'>2</div>..."
+  "coins_cost": "<div ...coins_amount'>2</div>...",
+  "other_cost": "...",      // range surcharge: 2 workers (Dwarves tunneling), 1 priest (Fakirs carpet flight)
+  "addendum": "(Tunneling)"
 }
 ```
 
@@ -169,9 +173,59 @@ Each **log entry** has:
   },
   "old_struct_name": "Dwelling",
   "new_struct_name": "Trading house",
-  "resource_cost": "<div ...>"
+  "resource_cost": "<div ...>"   // workers + coins icons in one field
 }
 ```
+Pre-mid-2022 replays have no `resource_cost`; the cost is split into `workers_cost` and `coins_cost` (same HTML icon format). 2022 has both formats.
+
+### powerActionBridge
+`power_cost` and `workers_cost` are both populated on every bridge. Which one was paid is determined by the log template: `spends ${power_cost} ... (Power action)` vs `spends ${workers_cost} ... (Engineers Ability)` (2 workers; 1 priest for Architects).
+
+### conversionsApplied / Alchemists conversions
+`conversionsApplied` args: `power_spent`, `priests_spent`, `workers_spent`, `priests_gained`, `workers_gained`, `coins_gained`, `newScore`. About a quarter fire with an empty log and all-zero amounts (score/counter carriers). `conversionsAppliedWithDelay` fires once per player in final scoring with no amounts.
+
+Alchemists trades are not in those fields. They arrive as a `justAMessage` immediately before a `conversionsApplied`:
+- `${player_name} converts ${vp_spent} into ${coins_gained} (Alchemists Ability)`
+- `${player_name} converts ${coins_spent} into ${vp_gained} (Alchemists Ability)`
+
+`justAMessage` lines `converts ${power_cost|workers_cost|priests_cost} into ${coins_gain}` (no `player_id`) are the automatic end-of-game resource→coin conversion before resource scoring.
+
+Other conversion-like events: `workersForPriests` (Darklings stronghold; `workers_cost`, `priests_gain`), `workersIncome` (Swarmlings +3 workers per town; `workers_income`). Dynion Geifr's priest → 2 workers + 2 coins needs no special handling: it arrives as a normal `conversionsApplied` with `priests_spent` 1, `workers_gained` 2, `coins_gained` 2.
+
+### Worker stock
+`updateCounters` has no workers counter. Workers are 65 tokens; events carry `workers`: `{worker_id: {"worker_id": ..., "player_id": owner or null}}`. `dwellingPlaced`, `structureUpgraded`, `terrainTransformed`, `powerActionBridge`, `advanceExchangeTrack` send all 65; `incomePhase`, `someIncome`, `cultBonus`, `townBonus`, `conversionsApplied`, `powerActionConvert` send only the tokens that changed owner. A player's stock is the number of tokens they own after applying every list.
+
+### actionUsed and specialActionUsed
+- `actionUsed` with `action_id` (no `player_id`): a power action space was taken. With `stronghold: true` and `player_id`: a stronghold action, every faction that has one (including the Chaos Magicians' double action). Logged before the effect events for most factions, after them for Architects (bridge), Children of the Wyrm (`tokenPlaced`), The Enlightened and Time Travellers.
+- `specialActionUsed`: `bonus_id` / `favor_id` non-zero for a bonus-card / favor-tile action (logged after the effect). With neither, it closes the `advanceCultTrack` logged just before it, whose `addendum` names the source: `(Cultists Ability)`, `(Auren Stronghold)`, `(Goblins ability)`.
+- `advanceCultTrack` `addendum` values: `''` (priest, town tile, power), `(Favor Tile)`, `(Favor tile action)`, `(Bonus card action)`, `(Cultists Ability)`, `(Auren Stronghold)`, `(Atlanteans Stronghold)`, `(Goblins ability)`, `(Djinni starting bonus)`.
+
+### Leech offers
+A leech phase starts at `gameStateChange` `id` 44 (`active_player` = the builder) and runs to the next state 44 or the next round. Inside it:
+- the offer: a `gameStateChange` whose inner `args` has `power_bonuses: {player_id: amount}` (what each player can take) and `power_caps: {player_id: amount}` (what was cut off by full bowls); `[]` when empty
+- accepts: `powerViaStructures`, log `... gets ${power_income} via Structures` (free) or `... pays ${vp_price} and gets ${power_income} ...`. A free 1-power leech is auto-accepted and logged before the offer, sometimes with no offer at all
+- declines: `justAMessage` `${player_name} declines getting Power via Structures` (player identified by `player_name` only)
+
+### Priest tokens
+Each player has 7 priest tokens. Events carry `priests`: `{priest_id: {"player_id", "priest_in_supply", "cos_id", "priest_in_treasury"}}` for the acting player (all 28 at `factionBoardChosen`). In hand = `priest_in_supply` "0" and `cos_id` null. `orderAPriest`/`advanceCultTrack` carry no list.
+
+### Turns and passing
+`gameStateChange` with `id` 41 (`type: activeplayer`) is the active player's main-action state, entered once per turn (always from state 4). Other ids in between are sub-steps (44/45 leech, 43 favor tile, 42 bonus card, 47 dwelling after transform).
+
+The first player to pass in rounds 1–5 gets `firstPlayerChanged` ("passes and becomes the first player for the next round") instead of `playerPassed`.
+
+### Fan-faction resource events
+- `gainRessources` — Goblins spend a Treasure token (their action): `power_gain`, `coins_gain`, `workers_gain`
+- `newPowerTokens` — The Enlightened buy power tokens with coins (`coins_spent`, `power_earned`); Children of the Wyrm use it with `coins_spent` 0
+- `gainPriests` — Dynion Geifr stronghold: `priests_gained`
+- `tokenPlaced` — Children of the Wyrm stronghold action (`bts_id_1`, `bts_id_2`, `sacrified_power_tokens`); the turn's only other event is `actionUsed` with `stronghold: true`
+- `updateTreasury` with `addendum="(Power action)"` — a Treasurers power action sent to the Treasury. No `powerActionConvert` fires; the turn has only this and `actionUsed` (`action_id` 2 = priest, 3 = 2 workers, 4 = 7 coins).
+- `updateTreasury` / `emptyTreasury` — Treasurers. Deposit `addendum` is `(Income)`, `(Bonus card)`, `(Town bonus)`, `(Power action)` (withheld before reaching the board; the granting event shows the net) or `(Conversion)` (taken off the board). `emptyTreasury` has no amounts; the doubled return is the `someIncome` that follows
+- `updateCounters` with a log — `earns ${coins_bonus} (Conspirators ability)`, `gains ${coins_gain} (Stronghold Action)` (Gold Diggers), `gains ${nb_spades} Spades to transform` (Wisps, Halflings stronghold)
+- `powerActionBridge` / `powerActionConvert` — `power_cost` holds coins when the faction pays power actions in coins
+
+### powerActionConvert
+`power_cost` normally holds a power icon; for fan factions that pay power actions in coins it holds a coins icon.
 
 ### advanceCultTrack
 ```json
@@ -364,5 +418,15 @@ Terrain types: plains, swamp, forest, lakes, mountains, wasteland, desert, ice, 
 
 ## Hex Coordinates
 
-Format: `[A-I][1-13]` (letter = column, number = row). Shown in `extra` field as ` [E3]`.
-The `bts_id` field also contains hex coordinates but sometimes differs (board tile space mapping).
+Every space on the board, land or river, is identified by BGA's `bts_id`: row letter `A`–`I` plus the position in that row counting **every** space (`bts_x`, 1-based; `bts_y` is the row number 1–9). Rows alternate 13 and 12 spaces (113 spaces; the Fire & Ice and Lakes boards start with a 12-space row, 112 spaces). The parser uses `bts_id` as the hex label, unchanged, for land and river spaces alike (`hex_coord`, `secondary_hex`).
+
+`gamedatas.board_terrain_spaces` lists every space with `bts_x`, `bts_y`, `bts_terrain` (`river` for rivers) and its current structure/town. `gamedatas.board_bridge_spaces` lists the 29 bridge slots by `bbs_id`, each with the `bts_id_up`/`bts_id_down` of the two spaces it joins.
+
+Events carry the cell as `bts_id` (or `new_struct.bts_id` for upgrades; `bts_id_1`/`bts_id_2` for the Children of the Wyrm tokens). Events on river spaces: Mermaids founding a town on a river (`townFounded`, "on a River space"), Selkies dwellings (`dwellingPlaced`), Children of the Wyrm stronghold tokens (`tokenPlaced`).
+
+**Do not use the `[E3]` labels in the log text** (`extra`, and bridge logs like `[D6-E9]`). They number only land spaces, so they drift from `bts_id` after the first river in a row, and river spaces show as `[R~<row><n>]` with n = land spaces to the left, which is not unique (adjacent river spaces share it; every board has such pairs). The parser decodes the bridge-log labels back to `bts_id` (see Bridges below) and reads nothing else from them.
+
+Snellman notation (and older versions of this parser) skip rivers: `E7` there is the 7th *land* space of row E. To convert, count land spaces in the row (`board_terrain_spaces`, ordered by `bts_x`).
+
+### Bridges
+A power-action bridge's log text carries the two endpoints (`[D6-E9]`, skip-rivers notation); ability bridges (Engineers, Architects, …) have none. The args carry `bbs_id`, the slot. For ~9% of power-action bridges (89 of 941 in a 500-game sample) the log endpoints and the `bbs_id` slot disagree. In every one of those 89 the log label is the slot of a bridge built earlier in the same game, never an invalid or never-built slot. Slots also repeat within a game (a slot built 3 times), so neither source is clearly reliable. The parser uses the log endpoints when present and `bbs_id` otherwise.
